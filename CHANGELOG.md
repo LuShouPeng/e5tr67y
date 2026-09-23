@@ -43,4 +43,11 @@
   原先只认插入那一次会导致整个窗口目标价为空；新增 `syncTargetPrice` 回填
   （仅在 `OPEN` 期间，重复同值不广播）。同时统一 SSE 首帧与行情推送的盘口形状，
   并让下单接口记录 `x-username`（成交流不再显示空名）。
+- **S2-1 前端骨架与终端浅色主题**：Vite + React 19 + TS，`npm run build` 产出
+  230 KB / gzip 72 KB；白色金融终端配色（白纸墨线 + 橙色强调、涨绿跌红、等宽数字
+  `tabular-nums`）；类型化 API 客户端（含 `ApiError` 错误码与 `retryable` 判定、
+  SSE 订阅含假 EventSource 注入点）；格式化工具（美分换算、倒计时、UTC→本地时间、
+  空值统一占位）；`/api` 开发代理；vitest + Testing Library 跑通。
+  注：宿主 `NODE_ENV=production` 会让 React 走生产构建、丢掉测试要用的 `act`，
+  已在 vitest 配置里钉住 `NODE_ENV=test`。
 
