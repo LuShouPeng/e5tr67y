@@ -98,6 +98,11 @@ export interface PredictionService {
   ensureAccount(userId: number, username?: string): void;
   gameBalanceOf(userId: number): number;
   ensureRound(startPrice?: number | null): RoundView;
+  /**
+   * 目标价晚到时回填。开回合和取到目标价是两个独立事件（回合由调度器建、价从上游来），
+   * 谁先到都有可能，所以「建回合」不能只认插入那一次。
+   */
+  syncTargetPrice(windowStart: number, price: number | null): boolean;
   currentRound(): RoundView;
   roundOf(windowStart: number): RoundView | null;
   lockRound(windowStart: number): boolean;
@@ -239,6 +244,20 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
       // 只在真的新建回合时广播，否则每秒一次的巡检会把推送刷成噪声
       publishRound(view);
       return view;
+    },
+
+    syncTargetPrice(windowStart, price) {
+      if (price == null) return false;
+      const round = rounds.findByWindowStart(windowStart);
+      if (round == null || round.status !== 'OPEN') return false;
+
+      const next = roundTo(price, 8);
+      if (round.startPrice != null && round.startPrice === next) return false;
+
+      if (rounds.updateStartPrice(windowStart, next) === 0) return false;
+      const updated = rounds.findByWindowStart(windowStart);
+      if (updated != null) publishRound(toRoundView(updated));
+      return true;
     },
 
     currentRound,

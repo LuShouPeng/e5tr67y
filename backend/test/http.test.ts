@@ -281,6 +281,44 @@ describe('GET /api/prediction/bets · rounds · pnl · live', () => {
       assert.equal(['UP', 'DOWN'].includes(row.side), true);
     }
   });
+
+  it('带 x-username 下单后，成交流显示打码用户名（不是空串）', async () => {
+    const named = makeHarness({ book: { upAsk: 0.5 } });
+    const namedApp = makeApp(named);
+    try {
+      const res = await namedApp.app.inject({
+        method: 'POST',
+        url: '/api/prediction/buy',
+        headers: { 'x-user-id': '77', 'x-username': 'realtrader' },
+        payload: { side: 'UP', amount: 10 },
+      });
+      assert.equal(res.statusCode, 200);
+
+      const live = await namedApp.app.inject({ method: 'GET', url: '/api/prediction/live' });
+      const row = live.json().rows[0];
+      assert.equal(row.username, 're***');
+      assert.equal(row.amount, 10);
+    } finally {
+      await namedApp.close();
+    }
+  });
+
+  it('已是老账户时不会被后续请求改名', async () => {
+    const named = makeHarness({ book: { upAsk: 0.5 } });
+    const namedApp = makeApp(named);
+    try {
+      named.accounts.ensure(88, '老名字');
+      await namedApp.app.inject({
+        method: 'POST',
+        url: '/api/prediction/buy',
+        headers: { 'x-user-id': '88', 'x-username': '新名字' },
+        payload: { side: 'UP', amount: 10 },
+      });
+      assert.equal(named.accounts.find(88)?.username, '老名字');
+    } finally {
+      await namedApp.close();
+    }
+  });
 });
 
 describe('GET /api/prediction/price-history', () => {
@@ -345,6 +383,9 @@ describe('GET /api/prediction/stream（SSE）', () => {
       await readUntil('event: round');
       await readUntil('event: market');
       assert.match(buffer, /"status":"OPEN"/);
+      // 首帧盘口必须与后续推送同形状（扁平字段），否则前端要写两套解析
+      assert.match(buffer, /"upBid":0\.6/);
+      assert.match(buffer, /"downAsk":0\.5/);
 
       // 下单 → 应收到 activity 推送
       sseHarness.service.buy(1, 'UP', 10);
