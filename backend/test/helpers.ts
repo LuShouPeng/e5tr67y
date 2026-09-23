@@ -2,7 +2,10 @@ import { openDatabase } from '../src/infra/db.ts';
 import { createAccountRepo, type AccountRepo } from '../src/infra/repos/accountRepo.ts';
 import { createBetRepo, type BetRepo } from '../src/infra/repos/betRepo.ts';
 import { createRoundRepo, type RoundRepo } from '../src/infra/repos/roundRepo.ts';
+import { createPriceHistory, type PriceHistory } from '../src/market/priceHistory.ts';
 import { createQuoteStore, type QuoteStore } from '../src/market/quoteStore.ts';
+import { buildApp } from '../src/http/app.ts';
+import { createEventBus, type EventBus } from '../src/services/eventBus.ts';
 import {
   createPredictionService,
   type PredictionService,
@@ -35,6 +38,7 @@ export interface Harness {
   rounds: RoundRepo;
   bets: BetRepo;
   accounts: AccountRepo;
+  events: EventBus;
   clock: ReturnType<typeof fixedClock>;
   /** 直接下手改库，用于构造不一致状态来验证事务回滚 */
   db: ReturnType<typeof openDatabase>;
@@ -59,6 +63,34 @@ export function makeHarness(options: HarnessOptions = {}): Harness {
     rounds.insertIfAbsent(windowStartFor(nowMs), startPrice);
   }
 
-  const service = createPredictionService({ db, rounds, bets, accounts, quotes, clock });
-  return { service, quotes, rounds, bets, accounts, clock, db, close: () => db.close() };
+  const events = createEventBus();
+  const service = createPredictionService({ db, rounds, bets, accounts, quotes, clock, events });
+  return { service, quotes, rounds, bets, accounts, events, clock, db, close: () => db.close() };
+}
+
+export interface TestApp {
+  app: ReturnType<typeof buildApp>;
+  prices: PriceHistory;
+  close(): Promise<void>;
+}
+
+/** 起一个不出网的 app（fastify.inject 直接打路由，不占端口） */
+export function makeApp(h: Harness): TestApp {
+  const prices = createPriceHistory();
+  const app = buildApp({
+    service: h.service,
+    quotes: h.quotes,
+    prices,
+    events: h.events,
+    clock: h.clock,
+    logger: false,
+  });
+  return {
+    app,
+    prices,
+    close: async () => {
+      await app.close();
+      h.close();
+    },
+  };
 }

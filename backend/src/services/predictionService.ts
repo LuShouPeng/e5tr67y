@@ -7,6 +7,7 @@ import { assertAmount, assertSide, planBuy, planSell, type BuyPlan } from '../do
 import { isQuoteFresh, normalizeAsk, normalizeBid, opposite, quoteFor } from '../domain/pricing.ts';
 import { isVoidDue, resolveOutcome } from '../domain/settlement.ts';
 import { computePnl, type PnlStats } from './pnl.ts';
+import type { EventBus } from './eventBus.ts';
 import type {
   BetStatus,
   PredictionBet,
@@ -58,6 +59,22 @@ export interface SettlePrices {
 /** 盈亏统计 + 账户视角：`equity` = 游戏钱包余额 + 持仓现值 */
 export type PnlView = PnlStats & { gameBalance: number; equity: number };
 
+export interface PageView<T> {
+  rows: T[];
+  total: number;
+  pageNum: number;
+  pageSize: number;
+}
+
+/** 全站成交流的一条：用户名打码，金额只亮成本 */
+export interface LiveBetView {
+  username: string;
+  side: Side;
+  amount: number;
+  ts: number;
+  createdAt: string;
+}
+
 export type SettleResult =
   | { status: 'SETTLED'; round: RoundView; outcome: Side; winners: number; paidOut: number }
   | { status: 'VOIDED'; round: RoundView; refunded: number; bets: number }
@@ -73,6 +90,8 @@ export interface PredictionServiceDeps {
   accounts: AccountRepo;
   quotes: QuoteStore;
   clock: Clock;
+  /** 可选：有订阅者时推送回合/成交流事件 */
+  events?: EventBus;
 }
 
 export interface PredictionService {
@@ -93,6 +112,12 @@ export interface PredictionService {
   sweepStuckRounds(priceLookup?: (windowStart: number) => SettlePrices | null): SettleResult[];
   /** 预测盈亏统计（含账户余额与总权益） */
   pnl(userId: number): PnlView;
+  /** 我的下注历史（分页） */
+  listBets(userId: number, pageNum?: number, pageSize?: number): PageView<BetView>;
+  /** 往期已结算回合（分页） */
+  listSettledRounds(pageNum?: number, pageSize?: number): PageView<RoundView>;
+  /** 全站最近成交，供实时成交流 */
+  recentActivity(limit?: number): LiveBetView[];
   toBetView(bet: PredictionBet): BetView;
 }
 
@@ -107,6 +132,16 @@ function soldCostOf(bet: PredictionBet, contracts: number): number {
 
 export function createPredictionService(deps: PredictionServiceDeps): PredictionService {
   const { db, rounds, bets, accounts, quotes, clock } = deps;
+  const events = deps.events;
+
+  /** 用户名打码：成交流是全站可见的，没必要把完整用户名摊出去 */
+  function maskUsername(username: string): string {
+    return username.length <= 2 ? username : `${username.slice(0, 2)}***`;
+  }
+
+  function publishRound(view: RoundView): void {
+    events?.publish('round', view);
+  }
 
   function toBetView(bet: PredictionBet): BetView {
     const book = quotes.get();
@@ -163,7 +198,12 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
 
   /** 封盘：CAS 带 status='OPEN'，重复调用无害 */
   function lockRound(windowStart: number): boolean {
-    return rounds.casLock(windowStart) > 0;
+    const locked = rounds.casLock(windowStart) > 0;
+    if (locked) {
+      const round = rounds.findByWindowStart(windowStart);
+      if (round != null) publishRound(toRoundView(round));
+    }
+    return locked;
   }
 
   function requireUsableAsk(side: Side, nowMs: number): number {
@@ -189,10 +229,16 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
 
     ensureRound(startPrice = null) {
       const ws = windowStartFor(clock.now());
+      let round = rounds.findByWindowStart(ws);
+      if (round != null) return toRoundView(round);
+
       rounds.insertIfAbsent(ws, startPrice);
-      const round = rounds.findByWindowStart(ws);
+      round = rounds.findByWindowStart(ws);
       if (round == null) throw new Error(`回合创建失败：windowStart=${ws}`);
-      return toRoundView(round);
+      const view = toRoundView(round);
+      // 只在真的新建回合时广播，否则每秒一次的巡检会把推送刷成噪声
+      publishRound(view);
+      return view;
     },
 
     currentRound,
@@ -226,7 +272,7 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
       const plan = planBuy(amount, requireUsableAsk(side, now));
 
       // 扣款与落单必须同事务：只扣钱不落单，用户就凭空少了一笔钱
-      return withTx(db, () => {
+      const view = withTx(db, () => {
         accounts.ensure(userId);
         if (accounts.addGameBalance(userId, -plan.total) === 0) {
           throw new DomainError(
@@ -245,6 +291,16 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
         });
         return toBetView(bet);
       });
+
+      // 推送刻意留在事务外：发出去就撤不回，事务回滚了推送还在就是假消息
+      events?.publish('activity', {
+        username: maskUsername(accounts.find(userId)?.username ?? '匿名'),
+        side,
+        amount: view.cost,
+        ts: clock.now(),
+        createdAt: view.createdAt,
+      });
+      return view;
     },
 
     sell(userId, betId, contracts = null) {
@@ -348,11 +404,41 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
       return { ...stats, gameBalance, equity: roundTo(gameBalance + stats.activeValue) };
     },
 
+    listBets(userId, pageNum = 1, pageSize = 10) {
+      const { rows, total } = bets.listByUser(userId, pageSize, (pageNum - 1) * pageSize);
+      return { rows: rows.map(toBetView), total, pageNum, pageSize };
+    },
+
+    listSettledRounds(pageNum = 1, pageSize = 10) {
+      const { rows, total } = rounds.listSettled(pageSize, (pageNum - 1) * pageSize);
+      return { rows: rows.map(toRoundView), total, pageNum, pageSize };
+    },
+
+    recentActivity(limit = 20) {
+      return bets.listRecent(limit).map((bet) => {
+        const username = accounts.find(bet.userId)?.username ?? '匿名';
+        return {
+          username: maskUsername(username),
+          side: bet.side,
+          amount: bet.cost,
+          ts: Date.parse(`${bet.createdAt.replace(' ', 'T')}Z`) || clock.now(),
+          createdAt: bet.createdAt,
+        };
+      });
+    },
+
     toBetView,
   };
 
   /** 定盘入口：只在回合已封盘时生效，取不到价则走作废分支 */
   function settleRound(windowStart: number, prices: SettlePrices = {}): SettleResult {
+    const result = settleOnce(windowStart, prices);
+    // 定盘/作废都要广播：前端据此刷新注单与余额
+    if (result.status === 'SETTLED' || result.status === 'VOIDED') publishRound(result.round);
+    return result;
+  }
+
+  function settleOnce(windowStart: number, prices: SettlePrices): SettleResult {
     const round = rounds.findByWindowStart(windowStart);
     if (round == null) return { status: 'SKIPPED', reason: 'NOT_FOUND' };
     if (round.status === 'SETTLED') return { status: 'SKIPPED', reason: 'ALREADY_SETTLED' };
