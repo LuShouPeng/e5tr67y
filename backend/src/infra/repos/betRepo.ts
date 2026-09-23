@@ -15,6 +15,8 @@ export interface NewBet {
 
 export interface BetRepo {
   insert(bet: NewBet): PredictionBet;
+  /** 直接落一条已卖出的注单（部分卖出时拆出来的那一笔） */
+  insertSold(bet: NewBet & { payout: number }): PredictionBet;
   findById(id: number): PredictionBet | null;
   listActiveByUser(userId: number): PredictionBet[];
   listByUser(userId: number, limit: number, offset: number): { rows: PredictionBet[]; total: number };
@@ -57,6 +59,11 @@ export function createBetRepo(db: DatabaseSync): BetRepo {
      VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')`,
   );
   const byId = db.prepare('SELECT * FROM prediction_bet WHERE id = ?');
+  const insertSold = db.prepare(
+    `INSERT INTO prediction_bet
+       (user_id, round_id, window_start, side, contracts, cost, avg_price, payout, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SOLD')`,
+  );
   const activeByUser = db.prepare(
     `SELECT * FROM prediction_bet WHERE user_id = ? AND status = 'ACTIVE' ORDER BY id DESC`,
   );
@@ -115,6 +122,20 @@ export function createBetRepo(db: DatabaseSync): BetRepo {
     findById(id) {
       const row = byId.get(id) as Record<string, unknown> | undefined;
       return row ? toBet(row) : null;
+    },
+    insertSold(bet) {
+      const info = insertSold.run(
+        bet.userId,
+        bet.roundId,
+        bet.windowStart,
+        bet.side,
+        roundTo(bet.contracts),
+        roundTo(bet.cost),
+        roundTo(bet.avgPrice),
+        roundTo(bet.payout),
+      );
+      const created = byId.get(Number(info.lastInsertRowid)) as Record<string, unknown>;
+      return toBet(created);
     },
     listActiveByUser(userId) {
       return (activeByUser.all(userId) as Record<string, unknown>[]).map(toBet);
