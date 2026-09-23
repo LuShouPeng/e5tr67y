@@ -1,0 +1,24 @@
+{
+  "name": "polymarket-predict-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BTC 5 分钟涨跌预测 —— 后端预测引擎与行情接入",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.ts",
+    "start": "node src/server.ts",
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.1.0",
+    "fastify": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}
