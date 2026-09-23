@@ -63,6 +63,21 @@ function amountOf(value: unknown): number {
 export function registerPredictionRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const { service, quotes, prices, events, clock } = deps;
 
+  /**
+   * 盘口的扁平投影。SSE 首帧与行情推送必须**同一个形状**：
+   * 两条来源不同形状不同，前端就得写两套解析——这正是线上最容易踩的一类坑。
+   */
+  function marketPayload(): Record<string, unknown> {
+    const book = quotes.get();
+    return {
+      upBid: book?.up.bid ?? null,
+      upAsk: book?.up.ask ?? null,
+      downBid: book?.down.bid ?? null,
+      downAsk: book?.down.ask ?? null,
+      ts: book?.ts ?? clock.now(),
+    };
+  }
+
   app.get('/api/health', () => ({ ok: true, serverTimeMs: clock.now() }));
 
   app.get('/api/prediction/current', () => ({
@@ -79,7 +94,10 @@ export function registerPredictionRoutes(app: FastifyInstance, deps: RouteDeps):
 
   app.post('/api/prediction/buy', (req) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    return service.buy(currentUserId(req), sideOf(body.side), amountOf(body.amount));
+    const userId = currentUserId(req);
+    // 先落一次身份：成交流要显示名字，而开户是幂等的（已有账户不会被改名）
+    service.ensureAccount(userId, currentUsername(req));
+    return service.buy(userId, sideOf(body.side), amountOf(body.amount));
   });
 
   app.post<{ Params: { betId: string }; Querystring: { contracts?: string } }>(
@@ -134,7 +152,7 @@ export function registerPredictionRoutes(app: FastifyInstance, deps: RouteDeps):
 
     // 首帧就把当前状态推下去，前端不用再补一次 GET
     send('round', service.currentRound());
-    send('market', quotes.get());
+    send('market', marketPayload());
 
     const unsubscribe = events.subscribe((e) => send(e.type, e.data));
     // 心跳：中间有反代时，静默的连接会被当成死连接掐掉
