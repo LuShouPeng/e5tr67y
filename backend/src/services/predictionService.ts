@@ -4,9 +4,17 @@ import { DomainError } from '../domain/errors.ts';
 import { isRoundSellable, isRoundTradable } from '../domain/lifecycle.ts';
 import { roundTo } from '../domain/money.ts';
 import { assertAmount, assertSide, planBuy, planSell, type BuyPlan } from '../domain/order.ts';
-import { isQuoteFresh, normalizeAsk, normalizeBid, quoteFor } from '../domain/pricing.ts';
-import type { BetStatus, PredictionBet, RoundOutcome, RoundStatus, Side } from '../domain/types.ts';
-import { remainingSeconds, windowStartFor } from '../domain/window.ts';
+import { isQuoteFresh, normalizeAsk, normalizeBid, opposite, quoteFor } from '../domain/pricing.ts';
+import { isVoidDue, resolveOutcome } from '../domain/settlement.ts';
+import type {
+  BetStatus,
+  PredictionBet,
+  PredictionRound,
+  RoundOutcome,
+  RoundStatus,
+  Side,
+} from '../domain/types.ts';
+import { previousWindowStart, remainingSeconds, windowStartFor } from '../domain/window.ts';
 import { withTx } from '../infra/db.ts';
 import type { AccountRepo } from '../infra/repos/accountRepo.ts';
 import type { BetRepo } from '../infra/repos/betRepo.ts';
@@ -41,6 +49,19 @@ export interface RoundView {
   serverTimeMs: number;
 }
 
+export interface SettlePrices {
+  startPrice?: number | null;
+  endPrice?: number | null;
+}
+
+export type SettleResult =
+  | { status: 'SETTLED'; round: RoundView; outcome: Side; winners: number; paidOut: number }
+  | { status: 'VOIDED'; round: RoundView; refunded: number; bets: number }
+  | {
+      status: 'SKIPPED';
+      reason: 'NOT_FOUND' | 'NOT_LOCKED' | 'ALREADY_SETTLED' | 'WAITING_FOR_PRICE';
+    };
+
 export interface PredictionServiceDeps {
   db: DatabaseSync;
   rounds: RoundRepo;
@@ -62,6 +83,10 @@ export interface PredictionService {
   sell(userId: number, betId: number, contracts?: number | null): BetView;
   /** 买入试算，供前端下注面板预览（不落库、不扣款） */
   previewBuy(side: Side, amount: number): BuyPlan;
+  /** 定盘：`LOCKED` 回合取开收盘价判涨跌、批量派彩；缺价则按等待策略作废退本金 */
+  settleRound(windowStart: number, prices?: SettlePrices): SettleResult;
+  /** 补结算巡检：捞出窗口早该结束却还停在 OPEN / LOCKED 的回合，补锁并重跑结算 */
+  sweepStuckRounds(priceLookup?: (windowStart: number) => SettlePrices | null): SettleResult[];
   toBetView(bet: PredictionBet): BetView;
 }
 
@@ -130,6 +155,11 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
     return toRoundView(round);
   }
 
+  /** 封盘：CAS 带 status='OPEN'，重复调用无害 */
+  function lockRound(windowStart: number): boolean {
+    return rounds.casLock(windowStart) > 0;
+  }
+
   function requireUsableAsk(side: Side, nowMs: number): number {
     const book = quotes.get();
     if (book == null || !isQuoteFresh(book, nowMs)) {
@@ -166,9 +196,7 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
       return round == null ? null : toRoundView(round);
     },
 
-    lockRound(windowStart) {
-      return rounds.casLock(windowStart) > 0;
-    },
+    lockRound,
 
     previewBuy(side, amount) {
       assertSide(side);
@@ -289,6 +317,100 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
       });
     },
 
+    settleRound,
+
+    sweepStuckRounds(priceLookup) {
+      const results: SettleResult[] = [];
+      // 阈值取上一窗口起点：上一个回合此刻正被正常结算、合法地停在 LOCKED，必须排除
+      const staleBefore = previousWindowStart(clock.now());
+      for (const round of rounds.listUnsettledBefore(staleBefore)) {
+        // 只认 LOCKED 的定盘先把 OPEN 补一次锁；CAS 带 status='OPEN'，重复跑无害
+        if (round.status === 'OPEN') lockRound(round.windowStart);
+        results.push(settleRound(round.windowStart, priceLookup?.(round.windowStart) ?? {}));
+      }
+      return results;
+    },
+
     toBetView,
   };
+
+  /** 定盘入口：只在回合已封盘时生效，取不到价则走作废分支 */
+  function settleRound(windowStart: number, prices: SettlePrices = {}): SettleResult {
+    const round = rounds.findByWindowStart(windowStart);
+    if (round == null) return { status: 'SKIPPED', reason: 'NOT_FOUND' };
+    if (round.status === 'SETTLED') return { status: 'SKIPPED', reason: 'ALREADY_SETTLED' };
+    if (round.status !== 'LOCKED') return { status: 'SKIPPED', reason: 'NOT_LOCKED' };
+
+    const startPrice = prices.startPrice ?? round.startPrice ?? null;
+    const endPrice = prices.endPrice ?? null;
+
+    if (startPrice == null || endPrice == null) {
+      return maybeVoid(round);
+    }
+    return settleWithPrice(round.id, startPrice, endPrice);
+  }
+
+  /** 缺价分支：等够了就作废退本金，没等够就下次巡检再说 */
+  function maybeVoid(round: PredictionRound): SettleResult {
+    const activeBetCount = bets.countActiveByRound(round.id);
+    const ageSeconds = (clock.now() - round.windowStart * 1000) / 1000;
+    if (!isVoidDue(ageSeconds, activeBetCount)) {
+      return { status: 'SKIPPED', reason: 'WAITING_FOR_PRICE' };
+    }
+
+    return withTx(db, () => {
+      // CAS 带 status='LOCKED'：重复跑不会二次退款
+      if (rounds.casVoid(round.id) === 0) {
+        return { status: 'SKIPPED', reason: 'ALREADY_SETTLED' } as const;
+      }
+      bets.settleDraw(round.id);
+      const refunds = bets.listByRoundAndStatus(round.id, 'DRAW');
+      let refunded = 0;
+      for (const bet of refunds) {
+        if (accounts.addGameBalance(bet.userId, bet.cost) === 0) {
+          throw new Error(`退款失败：账户不存在 user=${bet.userId}`);
+        }
+        refunded = roundTo(refunded + bet.cost);
+      }
+      const updated = rounds.findById(round.id);
+      if (updated == null) throw new Error(`作废后回合丢失：id=${round.id}`);
+      return { status: 'VOIDED', round: toRoundView(updated), refunded, bets: refunds.length };
+    });
+  }
+
+  /**
+   * 定盘 + 派彩，整回合一个事务。
+   * 这里不是「一批互相独立的任务」，而是一件事：回合定盘、全部注单改状态、全部派彩。
+   * 拆开提交的话，状态先落地而派彩失败 = 有人标了 WON 却没拿到钱，而回合已经 SETTLED，
+   * 这笔钱就静默丢了。所以批次必须同生共死，失败整批回滚留给下一次巡检；
+   * `casSettle` 的 `WHERE status='LOCKED'` 就是重跑的幂等边界。
+   */
+  function settleWithPrice(roundId: number, startPrice: number, endPrice: number): SettleResult {
+    const outcome = resolveOutcome(startPrice, endPrice);
+
+    return withTx(db, () => {
+      // 锁定后 updateStartPrice(WHERE status='OPEN') 已经够不着这行，另走一条只认空值的 CAS
+      rounds.fillStartPrice(roundId, startPrice);
+
+      if (rounds.casSettle(roundId, endPrice, outcome) === 0) {
+        return { status: 'SKIPPED', reason: 'ALREADY_SETTLED' } as const;
+      }
+
+      bets.settleWon(roundId, outcome);
+      bets.settleLost(roundId, opposite(outcome));
+      const winners = bets.listByRoundAndStatus(roundId, 'WON');
+      let paidOut = 0;
+      for (const winner of winners) {
+        // 每份合约兑付 $1，所以派彩额就是份数
+        if (accounts.addGameBalance(winner.userId, winner.contracts) === 0) {
+          throw new Error(`派彩失败：账户不存在 user=${winner.userId}`);
+        }
+        paidOut = roundTo(paidOut + winner.contracts);
+      }
+
+      const updated = rounds.findById(roundId);
+      if (updated == null) throw new Error(`结算后回合丢失：id=${roundId}`);
+      return { status: 'SETTLED', round: toRoundView(updated), outcome, winners: winners.length, paidOut };
+    });
+  }
 }

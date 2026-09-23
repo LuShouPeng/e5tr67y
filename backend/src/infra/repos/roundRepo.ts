@@ -10,6 +10,8 @@ export interface RoundRepo {
   findById(id: number): PredictionRound | null;
   /** 回填目标价，只在 OPEN 期间有效 */
   updateStartPrice(windowStart: number, startPrice: number): number;
+  /** 结算时补目标价：锁定后 updateStartPrice 已经够不着这行，另走一条只认空值的 CAS */
+  fillStartPrice(id: number, startPrice: number): number;
   /** 封盘 OPEN → LOCKED */
   casLock(windowStart: number): number;
   /** 定盘 LOCKED → SETTLED，带上结果价与方向 */
@@ -44,6 +46,11 @@ export function createRoundRepo(db: DatabaseSync): RoundRepo {
     `UPDATE prediction_round
         SET start_price = ?, updated_at = datetime('now')
       WHERE window_start = ? AND status = 'OPEN'`,
+  );
+  const fillStartPrice = db.prepare(
+    `UPDATE prediction_round
+        SET start_price = ?, updated_at = datetime('now')
+      WHERE id = ? AND start_price IS NULL`,
   );
   const casLock = db.prepare(
     `UPDATE prediction_round
@@ -88,6 +95,9 @@ export function createRoundRepo(db: DatabaseSync): RoundRepo {
     },
     updateStartPrice(windowStart, startPrice) {
       return Number(updatePrice.run(roundTo(startPrice, 8), windowStart).changes);
+    },
+    fillStartPrice(id, startPrice) {
+      return Number(fillStartPrice.run(roundTo(startPrice, 8), id).changes);
     },
     casLock(windowStart) {
       return Number(casLock.run(windowStart).changes);

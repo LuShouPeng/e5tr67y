@@ -36,6 +36,8 @@ export interface Harness {
   bets: BetRepo;
   accounts: AccountRepo;
   clock: ReturnType<typeof fixedClock>;
+  /** 直接下手改库，用于构造不一致状态来验证事务回滚 */
+  db: ReturnType<typeof openDatabase>;
   close(): void;
 }
 
@@ -52,9 +54,11 @@ export function makeHarness(options: HarnessOptions = {}): Harness {
     quotes.set({ upBid: 0.49, upAsk: 0.5, downBid: 0.49, downAsk: 0.5, ...options.book, ts: options.quoteTs ?? nowMs });
   }
   if (options.withRound !== false) {
-    rounds.insertIfAbsent(windowStartFor(nowMs), options.startPrice ?? 60_000);
+    // 显式传 null 表示「目标价暂时缺」，不能当成没传而被默认值顶掉
+    const startPrice = options.startPrice === undefined ? 60_000 : options.startPrice;
+    rounds.insertIfAbsent(windowStartFor(nowMs), startPrice);
   }
 
   const service = createPredictionService({ db, rounds, bets, accounts, quotes, clock });
-  return { service, quotes, rounds, bets, accounts, clock, close: () => db.close() };
+  return { service, quotes, rounds, bets, accounts, clock, db, close: () => db.close() };
 }
