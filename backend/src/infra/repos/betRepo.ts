@@ -19,6 +19,8 @@ export interface BetRepo {
   insertSold(bet: NewBet & { payout: number }): PredictionBet;
   findById(id: number): PredictionBet | null;
   listActiveByUser(userId: number): PredictionBet[];
+  /** 某用户的全部注单（盈亏统计要全量，不能只取一页） */
+  listAllByUser(userId: number): PredictionBet[];
   listByUser(userId: number, limit: number, offset: number): { rows: PredictionBet[]; total: number };
   listByRoundAndStatus(roundId: number, status: BetStatus): PredictionBet[];
   listRecent(limit: number): PredictionBet[];
@@ -71,6 +73,7 @@ export function createBetRepo(db: DatabaseSync): BetRepo {
   const byUser = db.prepare(
     'SELECT * FROM prediction_bet WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?',
   );
+  const allByUser = db.prepare('SELECT * FROM prediction_bet WHERE user_id = ? ORDER BY id ASC');
   const byRoundStatus = db.prepare(
     'SELECT * FROM prediction_bet WHERE round_id = ? AND status = ? ORDER BY id ASC',
   );
@@ -139,6 +142,9 @@ export function createBetRepo(db: DatabaseSync): BetRepo {
     },
     listActiveByUser(userId) {
       return (activeByUser.all(userId) as Record<string, unknown>[]).map(toBet);
+    },
+    listAllByUser(userId) {
+      return (allByUser.all(userId) as Record<string, unknown>[]).map(toBet);
     },
     listByUser(userId, limit, offset) {
       const rows = byUser.all(userId, limit, offset) as Record<string, unknown>[];

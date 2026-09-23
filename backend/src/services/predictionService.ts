@@ -6,6 +6,7 @@ import { roundTo } from '../domain/money.ts';
 import { assertAmount, assertSide, planBuy, planSell, type BuyPlan } from '../domain/order.ts';
 import { isQuoteFresh, normalizeAsk, normalizeBid, opposite, quoteFor } from '../domain/pricing.ts';
 import { isVoidDue, resolveOutcome } from '../domain/settlement.ts';
+import { computePnl, type PnlStats } from './pnl.ts';
 import type {
   BetStatus,
   PredictionBet,
@@ -54,6 +55,9 @@ export interface SettlePrices {
   endPrice?: number | null;
 }
 
+/** 盈亏统计 + 账户视角：`equity` = 游戏钱包余额 + 持仓现值 */
+export type PnlView = PnlStats & { gameBalance: number; equity: number };
+
 export type SettleResult =
   | { status: 'SETTLED'; round: RoundView; outcome: Side; winners: number; paidOut: number }
   | { status: 'VOIDED'; round: RoundView; refunded: number; bets: number }
@@ -87,6 +91,8 @@ export interface PredictionService {
   settleRound(windowStart: number, prices?: SettlePrices): SettleResult;
   /** 补结算巡检：捞出窗口早该结束却还停在 OPEN / LOCKED 的回合，补锁并重跑结算 */
   sweepStuckRounds(priceLookup?: (windowStart: number) => SettlePrices | null): SettleResult[];
+  /** 预测盈亏统计（含账户余额与总权益） */
+  pnl(userId: number): PnlView;
   toBetView(bet: PredictionBet): BetView;
 }
 
@@ -329,6 +335,17 @@ export function createPredictionService(deps: PredictionServiceDeps): Prediction
         results.push(settleRound(round.windowStart, priceLookup?.(round.windowStart) ?? {}));
       }
       return results;
+    },
+
+    pnl(userId) {
+      const book = quotes.get();
+      const stats = computePnl(
+        bets.listAllByUser(userId),
+        (side) => normalizeBid(quoteFor(book, side)?.bid ?? null),
+        windowStartFor(clock.now()),
+      );
+      const gameBalance = accounts.gameBalanceOf(userId);
+      return { ...stats, gameBalance, equity: roundTo(gameBalance + stats.activeValue) };
     },
 
     toBetView,
