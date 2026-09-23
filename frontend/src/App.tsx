@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import { createApiClient, type ApiClient } from './api/client.ts';
-import type { CurrentResponse } from './api/types.ts';
+import type { Side } from './api/types.ts';
 import { ERROR_HINT } from './api/types.ts';
-import { fmtCountdown, fmtMoney, fmtWindow } from './lib/format.ts';
+import { OddsBoard } from './components/OddsBoard.tsx';
+import { RoundPanel } from './components/RoundPanel.tsx';
+import { usePredictionMarket } from './hooks/usePredictionMarket.ts';
+import { fmtCountdown, fmtWindow } from './lib/format.ts';
 
 export interface AppProps {
   /** 测试注入：默认用真实 fetch 与同源 /api */
@@ -13,27 +16,8 @@ export interface AppProps {
 const defaultClient = createApiClient();
 
 export function App({ client = defaultClient }: AppProps) {
-  const [state, setState] = useState<{
-    data: CurrentResponse | null;
-    error: string | null;
-    loading: boolean;
-  }>({ data: null, error: null, loading: true });
-
-  const load = useCallback(async () => {
-    try {
-      const data = await client.current();
-      setState({ data, error: null, loading: false });
-    } catch (e) {
-      const code = (e as { code?: string }).code ?? 'INTERNAL_ERROR';
-      setState({ data: null, error: ERROR_HINT[code] ?? '加载失败，请稍后重试', loading: false });
-    }
-  }, [client]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const round = state.data?.round ?? null;
+  const [pick, setPick] = useState<Side>('UP');
+  const market = usePredictionMarket(client);
 
   return (
     <div className="shell">
@@ -43,57 +27,66 @@ export function App({ client = defaultClient }: AppProps) {
           <small>Polymarket 实时概率</small>
         </div>
         <div className="topbar-spacer" />
-        {round != null && (
+        {market.round != null && (
           <>
-            <span className="badge num">回合 {fmtWindow(round.windowStart)}</span>
-            <span className={`badge num ${round.status === 'OPEN' ? 'live' : 'locked'}`}>
+            <span className="badge num">回合 {fmtWindow(market.round.windowStart)}</span>
+            <span className={`badge num ${market.round.status === 'OPEN' ? 'live' : 'locked'}`}>
               <i className="dot pulse" />
-              {round.status === 'OPEN' ? '可交易' : '已封盘'}
+              {market.round.status === 'OPEN' ? '可交易' : '已封盘'}
             </span>
-            <span className="badge num">剩余 {fmtCountdown(round.remainingSeconds)}</span>
+            <span className="badge num">剩余 {fmtCountdown(market.countdown)}</span>
           </>
         )}
       </header>
 
       <main className="main">
         <section className="col">
+          <RoundPanel
+            round={market.round}
+            countdown={market.countdown}
+            clockOffsetMs={market.clockOffsetMs}
+            priceHistory={market.priceHistory}
+            degraded={market.degraded}
+            onRefresh={() => void market.refresh()}
+          />
+
           <div className="card">
             <div className="card-head">
-              <span className="card-title">回合状态</span>
+              <span className="card-title">赔率盘口</span>
+              {market.quoteStale && market.quote != null && (
+                <span className="badge degraded">旧价</span>
+              )}
             </div>
             <div className="card-body">
-              {state.loading && <p className="muted">正在读取回合…</p>}
-              {state.error != null && (
-                <p className="down">
-                  {state.error}
-                  <button type="button" className="badge" onClick={() => void load()} style={{ marginLeft: 10 }}>
-                    重试
-                  </button>
-                </p>
-              )}
-              {round != null && (
-                <dl className="kv">
-                  <dt>窗口</dt>
-                  <dd className="num">{fmtWindow(round.windowStart)}</dd>
-                  <dt>目标价</dt>
-                  <dd className="num">
-                    {round.startPrice == null ? '获取中' : fmtMoney(round.startPrice)}
-                  </dd>
-                  <dt>结果</dt>
-                  <dd className="num">{round.outcome ?? '待定'}</dd>
-                  <dt>盘口</dt>
-                  <dd className="num">
-                    {state.data?.quote == null
-                      ? '暂无报价'
-                      : `涨 ${state.data.quote.up.ask ?? '--'} / 跌 ${state.data.quote.down.ask ?? '--'}`}
-                  </dd>
-                </dl>
-              )}
+              <OddsBoard quote={market.quote} stale={market.quoteStale} onPick={setPick} />
             </div>
           </div>
         </section>
 
         <section className="col">
+          {market.error != null && (
+            <div className="notice error">
+              {ERROR_HINT[market.error.code] ?? market.error.message}
+              <button
+                type="button"
+                className="btn sm"
+                style={{ marginLeft: 10 }}
+                onClick={() => void market.refresh()}
+              >
+                重试
+              </button>
+            </div>
+          )}
+
+          <div className="card">
+            <div className="card-head">
+              <span className="card-title">下注</span>
+              <div className="topbar-spacer" />
+              <span className="badge">当前选择 {pick === 'UP' ? '看涨' : '看跌'}</span>
+            </div>
+            <div className="card-body muted">下注面板将在下一个迭代接入（S2-3）。</div>
+          </div>
+
           <div className="card">
             <div className="card-head">
               <span className="card-title">玩法说明</span>
