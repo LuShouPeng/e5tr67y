@@ -55,6 +55,8 @@ export interface FeedOptions {
   maxFailuresBeforeFallback?: number;
   simulated?: SimulatedMarket;
   log?: (message: string, meta?: Record<string, unknown>) => void;
+  /** 另有逐秒现货（Chainlink 流）写价格序列时置 true，这里就不再把开盘均价塞进曲线 */
+  externalPriceHistory?: boolean;
 }
 
 export interface MarketFeed {
@@ -65,6 +67,8 @@ export interface MarketFeed {
   status(): FeedStatus;
   /** 供结算使用：该窗口已知的开收盘价（缺则 null） */
   settlePrices(windowStart: number): SettlePrices | null;
+  /** 该窗口 UP / DOWN 的 CLOB token（实盘下单用）；还没解析到为 null */
+  tokens(windowStart: number): { upTokenId: string | null; downTokenId: string | null } | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 6000;
@@ -169,7 +173,7 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       // 先 ensureRound 保证回合在，再 syncTargetPrice 把晚到的价补上
       service.ensureRound(parsed.openPrice);
       service.syncTargetPrice(windowStart, parsed.openPrice);
-      prices.push(nowMs, parsed.openPrice);
+      if (!options.externalPriceHistory) prices.push(nowMs, parsed.openPrice);
     }
 
     // 上一回合的收盘价：只有 completed 才算数，否则会把「还在走的窗口」当成结果
@@ -279,6 +283,9 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       timer = null;
     },
     status: () => ({ ...status }),
+    tokens(windowStart) {
+      return tokenCache.get(windowStart) ?? null;
+    },
     settlePrices(windowStart) {
       const cached = priceCache.get(windowStart);
       if (cached == null) return null;

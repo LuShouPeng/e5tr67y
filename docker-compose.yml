@@ -3,10 +3,15 @@ services:
   backend:
     build:
       context: ./backend
+    # 策略 / 实盘 / LLM 的全部开关与密钥从 .env 读（见 .env.example）；没有 .env 也能起
+    env_file:
+      - path: .env
+        required: false
     environment:
       PORT: "8787"
       HOST: "0.0.0.0"
       WIIB_DB: /data/prediction.sqlite
+      LIVE_DB: /data/live.sqlite
       # polymarket：只用真盘；simulated：只用本地模拟；auto：上游连续失败后自动降级
       MARKET_FEED: ${MARKET_FEED:-auto}
     volumes:
