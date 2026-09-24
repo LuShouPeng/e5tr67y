@@ -71,3 +71,11 @@
   （混成一个总盈亏会让人以为钱已经到手），并给出累计投入、持仓成本/现值、
   钱包余额、总权益与猜对/猜错/卖出/作废战绩。
 
+### 交付
+
+- **S3-1 Docker 部署与文档**：`docker compose up --build` 一键起前后端
+  （后端 Node 24 运行时镜像无需编译——类型擦除直接跑 .ts；前端多段构建后由 nginx 托管）；
+  nginx 反代 `/api` 并**单独关掉 SSE 路径的缓冲**；后端用 node 自带 fetch 做健康检查，
+  前端 `depends_on: service_healthy`；数据落具名卷；`MARKET_FEED` 可选真盘/模拟/自动降级。
+  补充 `docs/attribution.md` 逐项列明沿用的上游业务语义与未沿用的部分。
+

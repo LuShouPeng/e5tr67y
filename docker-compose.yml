@@ -1,0 +1,30 @@
+# 一键起前后端：前端 nginx 把 /api 反代到后端，后端数据落在具名卷里
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      WIIB_DB: /data/prediction.sqlite
+      # polymarket：只用真盘；simulated：只用本地模拟；auto：上游连续失败后自动降级
+      MARKET_FEED: ${MARKET_FEED:-auto}
+    volumes:
+      - wiib-data:/data
+    ports:
+      # 直接暴露后端便于调试；生产可以只留前端那一个口
+      - "${BACKEND_PORT:-8787}:8787"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  wiib-data:
