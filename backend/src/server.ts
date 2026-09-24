@@ -19,6 +19,7 @@ import { createRedeemer, type Redeemer } from './live/redeemer.ts';
 import { createOrderQueue, type OrderQueue } from './execution/orderQueue.ts';
 import { createBinanceMarket } from './market/binance.ts';
 import { createChainlinkStream } from './market/chainlinkStream.ts';
+import { createClobBookStream } from './market/clobStream.ts';
 import { createMarketFeed } from './market/feed.ts';
 import { createPriceHistory } from './market/priceHistory.ts';
 import { createQuoteStore } from './market/quoteStore.ts';
@@ -68,7 +69,13 @@ const chainlink = createChainlinkStream({ onTick: (t) => prices.push(t.timeMs, t
 
 // 行情是回合的输入：喂目标价与盘口，并把已收官窗口的开收盘价交给调度器定盘
 let logWarn: (message: string, meta?: Record<string, unknown>) => void = () => {};
+// 盘口实时推送（CLOB market 频道）；模拟行情用不到
+const bookStream =
+  config.clobWs && config.feedMode !== 'simulated'
+    ? createClobBookStream({ onBook: (b) => feed.applyStreamBook(b), log: (m, meta) => logWarn(m, meta) })
+    : undefined;
 const feed = createMarketFeed({
+  bookStream,
   quotes,
   prices,
   service,
@@ -235,6 +242,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     redeemer?.stop();
     scheduler.stop();
     feed.stop();
+    bookStream?.stop();
     chainlink.stop();
     binance.stop();
     // 等手上的单执行完再关库，免得把 EXECUTING 的单留成 UNKNOWN

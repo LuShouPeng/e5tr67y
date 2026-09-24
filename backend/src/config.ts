@@ -16,6 +16,7 @@ export interface AppConfig {
   dbPath: string;
   feedMode: FeedMode;
   feedPollMs: number;
+  clobWs: boolean;
   binanceApiBase: string | undefined;
   binanceLiquidations: boolean;
   strategy: {
@@ -112,6 +113,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
     dbPath: str(env, 'WIIB_DB') ?? 'data/prediction.sqlite',
     feedMode,
     feedPollMs: number(env, 'FEED_POLL_MS', 5000, 1000, 60_000),
+    clobWs: bool(env, 'CLOB_WS', true),
     binanceApiBase: str(env, 'BINANCE_API_BASE'),
     binanceLiquidations: bool(env, 'BINANCE_LIQUIDATIONS', true),
     strategy: {

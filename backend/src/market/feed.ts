@@ -14,6 +14,7 @@ import {
   parseHttpDateMs,
 } from './polymarket.ts';
 import { createSimulatedMarket, type SimulatedMarket } from './simulated.ts';
+import type { ClobBookStream, StreamBook } from './clobStream.ts';
 import type { Clock } from '../services/clock.ts';
 import type { EventBus } from '../services/eventBus.ts';
 import type { PredictionService, SettlePrices } from '../services/predictionService.ts';
@@ -59,6 +60,12 @@ export interface FeedOptions {
   log?: (message: string, meta?: Record<string, unknown>) => void;
   /** 另有逐秒现货（Chainlink 流）写价格序列时置 true，这里就不再把开盘均价塞进曲线 */
   externalPriceHistory?: boolean;
+  /**
+   * CLOB 盘口 WebSocket。给了就由它实时推盘口（需把它的 onBook 接到 `applyStreamBook`），
+   * 轮询只负责订阅当前窗口的 token；流里的盘口超过 `streamMaxAgeMs` 没确认才退回 REST 拉账本。
+   */
+  bookStream?: ClobBookStream;
+  streamMaxAgeMs?: number;
 }
 
 export interface MarketFeed {
@@ -69,6 +76,8 @@ export interface MarketFeed {
   status(): FeedStatus;
   /** 供结算使用：该窗口已知的开收盘价（缺则 null） */
   settlePrices(windowStart: number): SettlePrices | null;
+  /** CLOB 流推来的盘口：只收当前窗口、只在真盘模式下写入 */
+  applyStreamBook(book: StreamBook): void;
   /** 该窗口 UP / DOWN 的 CLOB token 与 conditionId（实盘下单、领奖用）；还没解析到为 null */
   tokens(windowStart: number): ({ upTokenId: string | null; downTokenId: string | null } & Partial<MarketMeta>) | null;
 }
@@ -203,7 +212,18 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
 
     let quote: FeedSnapshot['quote'] = null;
     let bookTs = nowMs;
-    if (tokens.upTokenId != null && tokens.downTokenId != null) {
+    const stream = options.bookStream;
+    if (stream && tokens.upTokenId != null && tokens.downTokenId != null) {
+      stream.subscribe(windowStart, tokens.upTokenId, tokens.downTokenId);
+    }
+    const streamed = stream?.current();
+    const streamFresh =
+      streamed != null && streamed.windowStart === windowStart && clock.now() - streamed.ts <= (options.streamMaxAgeMs ?? 5_000);
+    if (streamFresh) {
+      // 盘口由流实时写入（applyStreamBook），这里不再拉账本
+      bookTs = streamed.ts;
+      quote = { upBid: streamed.upBid, upAsk: streamed.upAsk, downBid: streamed.downBid, downAsk: streamed.downAsk };
+    } else if (tokens.upTokenId != null && tokens.downTokenId != null) {
       const [upBook, downBook] = await Promise.all([
         getJson(clobBookUrl(tokens.upTokenId)),
         getJson(clobBookUrl(tokens.downTokenId)),
@@ -289,6 +309,14 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       timer = null;
     },
     status: () => ({ ...status }),
+    applyStreamBook(book) {
+      if (mode !== 'polymarket') return;
+      if (book.windowStart !== currentWindowStart(clock.now())) return;
+      quotes.set({ upBid: book.upBid, upAsk: book.upAsk, downBid: book.downBid, downAsk: book.downAsk, ts: book.ts });
+      options.events?.publish('market', {
+        upBid: book.upBid, upAsk: book.upAsk, downBid: book.downBid, downAsk: book.downAsk, ts: book.ts, degraded: false,
+      });
+    },
     tokens(windowStart) {
       return tokenCache.get(windowStart) ?? null;
     },
