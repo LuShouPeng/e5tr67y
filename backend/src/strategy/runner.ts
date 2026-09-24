@@ -1,5 +1,6 @@
 import { WINDOW_SECONDS, type Side } from '../domain/types.ts';
-import { OrderRejectedError, type Broker, type BrokerPosition } from '../execution/broker.ts';
+import type { Broker, BrokerPosition } from '../execution/broker.ts';
+import type { NewIntent, OrderQueue } from '../execution/orderQueue.ts';
 import type { FlowMetrics, Liquidation } from '../market/binance.ts';
 import type { DecisionRepo, DecisionRow } from './decisionRepo.ts';
 import type { Judge, Judgment } from './judges/types.ts';
@@ -12,7 +13,9 @@ import { buildState, StateUnavailableError, type Position, type Snapshot } from 
  * （默认 30,45,…,270）就问一次判官，每次一行落库；另一条每分钟的回填把结算结果、盈亏补进去。
  *
  * 一次检查点：查本回合持仓 → 写 state → 盘口太旧、Chainlink 停了就不问不动 → 问判官 →
- * 要成交的等 fill-delay 再看盘口，价没比判官看到的差才成交（跟真挂限价单一样），变差了算没抢到。
+ * 要成交的**挂一张单据进异步下单队列就返回**（见 execution/orderQueue.ts）：执行器等 fill-delay 再看盘口，
+ * 价没比判官看到的差才成交（跟真挂限价单一样），变差了算没抢到，结果回写到这一行决策。
+ * 该窗口还有没执行完的单时，检查点不问判官，记 ORDER_PENDING。
  * 钱包付不起一注、也没有等结算的仓位就自动关掉开关。
  */
 
@@ -35,6 +38,7 @@ export interface RunnerConfig {
   checkpointSeconds: number[];
   baseStake: number;
   actThreshold: number;
+  /** 下单队列用：挂单后等多久再看盘口 */
   fillDelayMs: number;
   bookMaxAgeMs: number;
   chainlinkMaxAgeMs: number;
@@ -55,10 +59,11 @@ export const DEFAULT_RUNNER_CONFIG: RunnerConfig = {
 export interface RunnerOptions {
   judge: Judge;
   broker: Broker;
+  /** 异步下单队列；其 onSettled 应回写 decisions.applyExecution */
+  orders: OrderQueue;
   decisions: DecisionRepo;
   market: StrategyMarketData;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
   config?: Partial<RunnerConfig>;
   enabled?: boolean;
   /** 窗口结果已知时通知（实盘用来给持仓记输赢） */
@@ -105,9 +110,8 @@ export function checkpointFor(elapsedSeconds: number, cfg: RunnerConfig): string
 const round4 = (v: number | null | undefined): number | null => (v == null || !Number.isFinite(v) ? null : Math.round(v * 1e4) / 1e4);
 
 export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
-  const { judge, broker, decisions, market } = options;
+  const { judge, broker, decisions, market, orders } = options;
   const now = options.now ?? Date.now;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const cfg: RunnerConfig = {
     ...DEFAULT_RUNNER_CONFIG,
     ...options.config,
@@ -168,18 +172,12 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
     d.rationale = j.rationale ?? null;
   }
 
-  /** 等 fill-delay 再读盘口；这时盘口旧了回 null */
-  async function bookAfterDelay(d: DecisionRow): Promise<rules.Book | null> {
-    await sleep(cfg.fillDelayMs);
-    const b = market.book();
-    if (b == null || now() - b.ts > cfg.bookMaxAgeMs) {
-      d.reason = 'STALE_WHILE_ASKING';
-      return null;
-    }
-    return b.book;
+  /** 单据最晚执行时间：过了最后检查点就可能撞上锁盘 */
+  function expiresAt(ws: number): number {
+    return (ws + cfg.lastCheckpointSeconds) * 1000;
   }
 
-  async function entry(d: DecisionRow, ws: number, j: Judgment, seen: rules.Book, pModel: number): Promise<void> {
+  async function entry(d: DecisionRow, ws: number, j: Judgment, seen: rules.Book, pModel: number): Promise<NewIntent | null> {
     const balance = await broker.balance();
     const e = rules.entry(j.decision, seen, balance, cfg);
     d.action = 'STAY_OUT';
@@ -191,71 +189,43 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
         enabled = false;
         log('钱包付不起一注，自动关闭策略');
       }
-      return;
+      return null;
     }
-    if (e.action === 'STAY_OUT' || e.side == null || askSeen == null) return;
-    const nowBook = await bookAfterDelay(d);
-    if (nowBook == null) return;
-    const askNow = rules.askOf(nowBook, e.side);
-    if (askNow == null || askNow > askSeen) {
-      d.reason = `MISSED ${e.side} ask ${askSeen}→${askNow ?? 'none'}`;
-      return;
-    }
-    // 价低了手续费占本金的比例反而高，按成交价再算一次付不付得起
-    const stake = rules.stake(e.stake ?? cfg.baseStake, balance, askNow);
-    if (stake == null) {
-      d.reason = rules.NO_BALANCE;
-      return;
-    }
-    try {
-      const fill = await broker.buy({ windowStart: ws, side: e.side, stake, maxPrice: askSeen });
-      d.fillId = fill.id;
-      d.stake = round4(fill.amount);
-      d.shares = round4(fill.contracts);
-      d.avgPrice = round4(fill.avgPrice);
-      d.action = e.action;
-      if (fill.dryRun) d.reason = `${d.reason} DRY_RUN`;
-    } catch (err) {
-      if (err instanceof OrderRejectedError) {
-        d.reason = `${err.code} ${err.message}`;
-        return;
-      }
-      throw err;
-    }
+    if (e.action === 'STAY_OUT' || e.side == null || askSeen == null || e.stake == null) return null;
+    d.reason = `QUEUED ${e.reason}`;
+    return {
+      windowStart: ws, checkpoint: d.checkpoint, kind: 'BUY', side: e.side, stake: e.stake, limitPrice: askSeen,
+      positionId: null, expiresAt: expiresAt(ws),
+    };
   }
 
-  async function exit(d: DecisionRow, j: Judgment, seen: rules.Book, active: BrokerPosition, pModel: number): Promise<void> {
+  function exit(d: DecisionRow, ws: number, j: Judgment, seen: rules.Book, active: BrokerPosition, pModel: number): NewIntent | null {
     const side = active.side;
     const r = rules.exit(j.decision, side, seen, cfg);
     d.action = 'HOLD';
     d.reason = r.reason;
     const bidSeen = rules.bidOf(seen, side);
     if (bidSeen != null) d.edge = round4(rules.sellOver(rules.sideP(pModel, side), bidSeen));
-    if (r.action !== 'SELL' || bidSeen == null) return;
-    const nowBook = await bookAfterDelay(d);
-    if (nowBook == null) return;
-    const bidNow = rules.bidOf(nowBook, side);
-    if (bidNow == null || bidNow < bidSeen) {
-      d.reason = `MISSED SELL bid ${bidSeen}→${bidNow ?? 'none'}`;
-      return;
-    }
-    try {
-      await broker.sell({ position: active, minPrice: bidSeen });
-      d.action = 'SELL';
-    } catch (err) {
-      if (err instanceof OrderRejectedError) {
-        d.reason = `${err.code} ${err.message}`;
-        return;
-      }
-      throw err;
-    }
+    if (r.action !== 'SELL' || bidSeen == null) return null;
+    d.reason = `QUEUED ${r.reason}`;
+    return {
+      windowStart: ws, checkpoint: d.checkpoint, kind: 'SELL', side, stake: null, limitPrice: bidSeen,
+      positionId: active.id, expiresAt: expiresAt(ws),
+    };
   }
 
   async function runCheckpoint(ws: number, cp: string): Promise<DecisionRow | null> {
     if (decisions.exists(broker.kind, ws, cp)) return null;
     const t = now();
     const d = baseRow(ws, cp, t);
+    let intent: NewIntent | null = null;
     try {
+      const pendingOrder = orders.pendingFor(ws);
+      if (pendingOrder != null) {
+        d.action = 'STAY_OUT';
+        d.reason = `ORDER_PENDING #${pendingOrder.id} ${pendingOrder.kind} ${pendingOrder.status}`;
+        return d;
+      }
       if (!market.healthy()) {
         d.action = 'STAY_OUT';
         d.reason = 'FEED_DEGRADED';
@@ -321,10 +291,10 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
       }
       const j = await judge.judge(snap, position);
       fillJudgment(d, j);
-      if (active) await exit(d, j, b.book, active, snap.raw.pModel);
-      else await entry(d, ws, j, b.book, snap.raw.pModel);
+      intent = active ? exit(d, ws, j, b.book, active, snap.raw.pModel) : await entry(d, ws, j, b.book, snap.raw.pModel);
       return d;
     } catch (e) {
+      intent = null;
       const msg = e instanceof Error ? e.message : String(e);
       d.action = 'ERROR';
       d.error = msg.slice(0, 500);
@@ -332,8 +302,13 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
       log('检查点失败', { windowStart: ws, checkpoint: cp, error: d.error });
       return d;
     } finally {
+      // 先落决策再挂单：执行器的回写一定能找到这一行
       decisions.insert(d);
       lastDecisionAt = t;
+      if (intent != null) {
+        const queued = orders.enqueue(intent);
+        log('已挂单', { intent: queued.id, kind: queued.kind, side: queued.side, limit: queued.limitPrice });
+      }
     }
   }
 

@@ -16,6 +16,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
     "@fastify/cors": "^10.1.0",
+    "@polymarket/builder-relayer-client": "^0.0.10",
+    "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client": "^5.8.1",
     "fastify": "^5.4.0",
     "viem": "^2.56.8",

@@ -143,3 +143,27 @@ export function parseHttpDateMs(value: string | null | undefined): number | null
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }
+
+export interface MarketMeta {
+  /** CTF 条件 id（0x + 64 位十六进制），赢了领奖（redeemPositions）要用 */
+  conditionId: string | null;
+  /** neg-risk 市场领奖要走 NegRiskAdapter；BTC 5 分钟涨跌盘是普通二元市场 */
+  negRisk: boolean;
+}
+
+/** 从 Gamma 事件里取本窗口市场的 conditionId 与 negRisk；优先 slug 精确匹配的那个市场 */
+export function parseGammaMarketMeta(event: unknown, slug: string): MarketMeta | null {
+  const markets = (event as { markets?: unknown })?.markets;
+  if (!Array.isArray(markets)) return null;
+  let found: MarketMeta | null = null;
+  for (const raw of markets) {
+    const market = raw as Record<string, unknown>;
+    if (market == null || typeof market !== 'object') continue;
+    const conditionId =
+      typeof market.conditionId === 'string' && /^0x[0-9a-fA-F]{64}$/.test(market.conditionId) ? market.conditionId : null;
+    const meta = { conditionId, negRisk: market.negRisk === true };
+    if (found == null) found = meta;
+    if (market.slug === slug) return meta;
+  }
+  return found;
+}

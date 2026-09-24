@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { createOrderQueue } from '../src/execution/orderQueue.ts';
 import { createPaperBroker, DEFAULT_BOT_USER_ID } from '../src/execution/paperBroker.ts';
 import { createDecisionRepo } from '../src/strategy/decisionRepo.ts';
 import type { Judge, Judgment } from '../src/strategy/judges/types.ts';
@@ -66,16 +67,32 @@ function setup(options: { judge: Judge; lead?: number; book?: Partial<Book>; onS
   const market = fakeMarket(h, options.lead);
   const decisions = createDecisionRepo(h.db);
   const broker = createPaperBroker({ service: h.service, quotes: h.quotes });
+  const orders = createOrderQueue({
+    db: h.db,
+    broker,
+    book: () => market.book(),
+    bookMaxAgeMs: 7000,
+    fillDelayMs: 1000,
+    now: () => h.clock.now(),
+    sleep: async () => options.onSleep?.(market),
+    onSettled: (i, patch) => decisions.applyExecution(i.broker, i.windowStart, i.checkpoint, patch),
+  });
   const runner = createStrategyRunner({
     judge: options.judge,
     broker,
+    orders,
     decisions,
     market,
     now: () => h.clock.now(),
-    sleep: async () => options.onSleep?.(market),
     enabled: true,
   });
-  return { h, market, decisions, broker, runner };
+  /** 跑一个检查点并等异步下单跑完，返回回写后的决策行 */
+  async function checkpoint(cp: string) {
+    const d = await runner.runCheckpoint(WS, cp);
+    await orders.drain();
+    return d == null ? null : decisions.recent('paper', 50).find((r) => r.checkpoint === cp)!;
+  }
+  return { h, market, decisions, broker, runner, orders, checkpoint };
 }
 
 describe('检查点划分', () => {
@@ -89,10 +106,12 @@ describe('检查点划分', () => {
 });
 
 describe('策略回路 × 模拟盘', () => {
-  it('判官买 UP → 机器人账户下注，决策落库；同一检查点不重跑', async () => {
-    const { h, decisions, runner, broker } = setup({ judge: scriptedJudge('BUY_UP') });
-    const d = await runner.runCheckpoint(WS, 'T120');
+  it('判官买 UP → 先挂单，异步成交后回写决策；同一检查点不重跑', async () => {
+    const { h, decisions, runner, broker, orders, checkpoint } = setup({ judge: scriptedJudge('BUY_UP') });
+    const d = await checkpoint('T120');
     assert.equal(d!.action, 'BUY_UP');
+    assert.match(d!.reason!, /^BUY UP filled @0.56/);
+    assert.equal(orders.recent(1)[0]!.status, 'FILLED');
     assert.equal(d!.pJudge, 0.6);
     assert.ok(d!.pModel! > 0.5);
     const pos = await broker.position(WS);
@@ -105,8 +124,9 @@ describe('策略回路 × 模拟盘', () => {
   });
 
   it('等成交期间卖价变差 → MISSED，不下单', async () => {
-    const { h, runner, broker } = setup({ judge: scriptedJudge('BUY_UP'), onSleep: (m) => m.setBook({ upAsk: 0.6 }) });
-    const d = await runner.runCheckpoint(WS, 'T120');
+    const { h, broker, orders, checkpoint } = setup({ judge: scriptedJudge('BUY_UP'), onSleep: (m) => m.setBook({ upAsk: 0.6 }) });
+    const d = await checkpoint('T120');
+    assert.equal(orders.recent(1)[0]!.status, 'MISSED');
     assert.equal(d!.action, 'STAY_OUT');
     assert.match(d!.reason!, /^MISSED UP ask 0.56→0.6/);
     assert.equal(await broker.position(WS), null);
@@ -114,9 +134,9 @@ describe('策略回路 × 模拟盘', () => {
   });
 
   it('持仓时问离场，判官卖就卖掉', async () => {
-    const { h, runner, broker } = setup({ judge: scriptedJudge('SELL', 0.9) });
+    const { h, broker, checkpoint } = setup({ judge: scriptedJudge('SELL', 0.9) });
     await broker.buy({ windowStart: WS, side: 'UP', stake: 10, maxPrice: 0.99 });
-    const d = await runner.runCheckpoint(WS, 'T135');
+    const d = await checkpoint('T135');
     assert.equal(d!.action, 'SELL');
     assert.equal(await broker.position(WS), null);
     h.close();
@@ -146,8 +166,8 @@ describe('策略回路 × 模拟盘', () => {
   });
 
   it('回填：回合定盘后补结果与盈亏', async () => {
-    const { h, runner, decisions, market } = setup({ judge: scriptedJudge('BUY_UP') });
-    await runner.runCheckpoint(WS, 'T120');
+    const { h, runner, decisions, market, checkpoint } = setup({ judge: scriptedJudge('BUY_UP') });
+    await checkpoint('T120');
     // 走到下一窗口并定盘（UP 赢）
     h.clock.set(BASE_NOW + 300_000 + 90_000);
     h.service.lockRound(WS);
@@ -158,6 +178,58 @@ describe('策略回路 × 模拟盘', () => {
     assert.equal(row.outcome, 'UP');
     assert.ok(row.pnl! > 0);
     assert.equal(decisions.summary('paper').wins, 1);
+    h.close();
+  });
+});
+
+describe('异步下单队列', () => {
+  it('挂单后回路立刻返回；单未执行完时下一个检查点不问判官', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const judge = scriptedJudge('BUY_UP');
+    const h = makeHarness({ nowMs: NOW, book: { upBid: 0.55, upAsk: 0.56, downBid: 0.43, downAsk: 0.44 } });
+    const market = fakeMarket(h);
+    const decisions = createDecisionRepo(h.db);
+    const broker = createPaperBroker({ service: h.service, quotes: h.quotes });
+    const orders = createOrderQueue({
+      db: h.db, broker, book: () => market.book(), bookMaxAgeMs: 7000, fillDelayMs: 1000, now: () => h.clock.now(),
+      sleep: () => gate,
+      onSettled: (i, p) => decisions.applyExecution(i.broker, i.windowStart, i.checkpoint, p),
+    });
+    const runner = createStrategyRunner({ judge, broker, orders, decisions, market, now: () => h.clock.now(), enabled: true });
+
+    const first = await runner.runCheckpoint(WS, 'T120');
+    assert.match(first!.reason!, /^QUEUED BUY UP/);
+    assert.equal(orders.pendingFor(WS)!.status, 'QUEUED');
+    const second = await runner.runCheckpoint(WS, 'T135');
+    assert.match(second!.reason!, /^ORDER_PENDING #1 BUY/);
+    assert.equal(judge.calls, 1);
+
+    release();
+    await orders.drain();
+    assert.equal(orders.pendingFor(WS), null);
+    assert.equal(decisions.recent('paper', 5).find((r) => r.checkpoint === 'T120')!.action, 'BUY_UP');
+    h.close();
+  });
+
+  it('过了最后下单时间的单作废；重启时残留单据被收拾', async () => {
+    const h = makeHarness({ nowMs: NOW });
+    const market = fakeMarket(h);
+    const broker = createPaperBroker({ service: h.service, quotes: h.quotes });
+    const orders = createOrderQueue({
+      db: h.db, broker, book: () => market.book(), bookMaxAgeMs: 7000, fillDelayMs: 1000, now: () => h.clock.now(),
+      sleep: async () => h.clock.advance(400_000),
+    });
+    orders.enqueue({ windowStart: WS, checkpoint: 'T270', kind: 'BUY', side: 'UP', stake: 5, limitPrice: 0.6, positionId: null, expiresAt: (WS + 285) * 1000 });
+    await orders.drain();
+    assert.equal(orders.recent(1)[0]!.status, 'EXPIRED');
+    assert.equal(await broker.position(WS), null);
+
+    h.db.prepare("UPDATE order_intent SET status = 'EXECUTING'").run();
+    h.db.prepare(
+      "INSERT INTO order_intent (broker, window_start, checkpoint, kind, side, limit_price, status, created_at, not_before, expires_at, updated_at) VALUES ('paper', 1, 'T30', 'BUY', 'UP', 0.5, 'QUEUED', 0, 0, 0, 0)",
+    ).run();
+    assert.deepEqual(orders.recover(), { expired: 1, unknown: 1 });
     h.close();
   });
 });

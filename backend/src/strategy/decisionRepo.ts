@@ -98,6 +98,13 @@ export interface DecisionRepo {
   /** 还没回填结果、窗口已结束的行 */
   pendingSettle(broker: string, beforeWindowStart: number, sinceWindowStart: number): DecisionRow[];
   fill(id: number, outcome: string | null, pnl: number | null): void;
+  /** 异步下单有结果后回写执行结果 */
+  applyExecution(
+    broker: string,
+    windowStart: number,
+    checkpoint: string,
+    patch: { action?: string; reason: string; fillId?: string | null; stake?: number | null; shares?: number | null; avgPrice?: number | null },
+  ): void;
   /** 买入行的战绩汇总 */
   summary(broker: string): { decisions: number; bets: number; settledBets: number; wins: number; pnl: number };
 }
@@ -131,6 +138,16 @@ export function createDecisionRepo(db: DatabaseSync): DecisionRepo {
     },
     fill(id, outcome, pnl) {
       db.prepare('UPDATE strategy_decision SET outcome = COALESCE(?, outcome), pnl = COALESCE(?, pnl) WHERE id = ?').run(outcome, pnl, id);
+    },
+    applyExecution(broker, ws, cp, patch) {
+      db.prepare(
+        `UPDATE strategy_decision SET action = COALESCE(?, action), reason = ?, fill_id = COALESCE(?, fill_id),
+           stake = COALESCE(?, stake), shares = COALESCE(?, shares), avg_price = COALESCE(?, avg_price)
+         WHERE broker = ? AND window_start = ? AND checkpoint = ?`,
+      ).run(
+        patch.action ?? null, patch.reason, patch.fillId ?? null, patch.stake ?? null, patch.shares ?? null, patch.avgPrice ?? null,
+        broker, ws, cp,
+      );
     },
     summary(broker) {
       const r = db

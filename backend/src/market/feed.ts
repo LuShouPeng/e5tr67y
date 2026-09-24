@@ -8,7 +8,9 @@ import {
   gammaEventUrl,
   parseBook,
   parseCryptoPrice,
+  parseGammaMarketMeta,
   parseGammaTokens,
+  type MarketMeta,
   parseHttpDateMs,
 } from './polymarket.ts';
 import { createSimulatedMarket, type SimulatedMarket } from './simulated.ts';
@@ -67,8 +69,8 @@ export interface MarketFeed {
   status(): FeedStatus;
   /** 供结算使用：该窗口已知的开收盘价（缺则 null） */
   settlePrices(windowStart: number): SettlePrices | null;
-  /** 该窗口 UP / DOWN 的 CLOB token（实盘下单用）；还没解析到为 null */
-  tokens(windowStart: number): { upTokenId: string | null; downTokenId: string | null } | null;
+  /** 该窗口 UP / DOWN 的 CLOB token 与 conditionId（实盘下单、领奖用）；还没解析到为 null */
+  tokens(windowStart: number): ({ upTokenId: string | null; downTokenId: string | null } & Partial<MarketMeta>) | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 6000;
@@ -104,7 +106,7 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
   let mode: Exclude<FeedMode, 'auto'> = options.mode === 'simulated' ? 'simulated' : 'polymarket';
   const requestedMode: FeedMode = options.mode ?? 'polymarket';
 
-  const tokenCache = new Map<number, { upTokenId: string | null; downTokenId: string | null }>();
+  const tokenCache = new Map<number, { upTokenId: string | null; downTokenId: string | null } & Partial<MarketMeta>>();
   const priceCache = new Map<number, SettlePrices>();
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
@@ -192,9 +194,9 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
     let tokens = tokenCache.get(windowStart);
     if (tokens == null) {
       const event = await getJson(gammaEventUrl(windowStart));
-      tokens = parseGammaTokens(event.json, eventSlug(windowStart)) ?? {
-        upTokenId: null,
-        downTokenId: null,
+      tokens = {
+        ...(parseGammaTokens(event.json, eventSlug(windowStart)) ?? { upTokenId: null, downTokenId: null }),
+        ...(parseGammaMarketMeta(event.json, eventSlug(windowStart)) ?? {}),
       };
       tokenCache.set(windowStart, tokens);
     }

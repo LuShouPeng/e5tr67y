@@ -14,6 +14,9 @@ import { createClob } from './live/clob.ts';
 import { createGeoGuard } from './live/geoblock.ts';
 import { createLiveBroker, type LiveBroker } from './live/liveBroker.ts';
 import { openLiveStore, type LiveStore } from './live/liveStore.ts';
+import { createRedeemChain, RedeemUnavailableError } from './live/redeemChain.ts';
+import { createRedeemer, type Redeemer } from './live/redeemer.ts';
+import { createOrderQueue, type OrderQueue } from './execution/orderQueue.ts';
 import { createBinanceMarket } from './market/binance.ts';
 import { createChainlinkStream } from './market/chainlinkStream.ts';
 import { createMarketFeed } from './market/feed.ts';
@@ -89,6 +92,8 @@ const scheduler = createScheduler({
 let runner: StrategyRunner | null = null;
 let strategyRoutes: StrategyRouteDeps | null = null;
 let liveStore: LiveStore | null = null;
+let orders: OrderQueue | null = null;
+let redeemer: Redeemer | null = null;
 const binance = createBinanceMarket({ apiBase: config.binanceApiBase });
 
 if (config.strategy.enabled) {
@@ -102,6 +107,8 @@ if (config.strategy.enabled) {
   let broker: Broker;
   let liveBroker: LiveBroker | null = null;
   let decisions;
+  let redeemDisabledReason: string | null = null;
+  let ordersDb = db;
   const geo = createGeoGuard();
   if (config.strategy.broker === 'live') {
     ensureDir(config.live.dbPath);
@@ -125,8 +132,29 @@ if (config.strategy.enabled) {
       dryRun: config.live.dryRun,
     });
     broker = liveBroker;
-    // 实盘决策日志与实盘账本同库，和模拟盘彻底分开
+    // 实盘决策日志、下单队列与实盘账本同库，和模拟盘彻底分开
     decisions = createDecisionRepo(liveStore.db);
+    ordersDb = liveStore.db;
+    if (config.live.dryRun) {
+      redeemDisabledReason = 'dry-run 没有链上份额，不领奖';
+    } else if (!config.live.autoRedeem) {
+      redeemDisabledReason = 'LIVE_AUTO_REDEEM=false，请到 Polymarket 网页手动领取';
+    } else {
+      try {
+        const chain = createRedeemChain({
+          privateKey: config.live.privateKey,
+          signatureType: config.live.signatureType,
+          rpcUrl: config.live.polygonRpcUrl,
+          relayerUrl: config.live.relayerUrl,
+          builderCreds: config.live.builderCreds,
+        });
+        redeemer = createRedeemer({ store: liveStore, chain, log: (m, meta) => logWarn(m, meta) });
+      } catch (e) {
+        if (!(e instanceof RedeemUnavailableError)) throw e;
+        redeemDisabledReason = e.message;
+        console.warn(`自动领奖未启用：${e.message}`);
+      }
+    }
     const g = await geo.ensure();
     if (!g.allowed) console.warn(`实盘地域检查未通过，实盘下单将被拒绝：${g.reason}`);
   } else {
@@ -135,19 +163,33 @@ if (config.strategy.enabled) {
   }
 
   if (config.binanceLiquidations) binance.startLiquidations();
+  const decisionLog = decisions;
+  const marketData = createStrategyMarketData({
+    feed,
+    quotes,
+    chainlink,
+    binance,
+    service,
+    clock,
+    liquidationsEnabled: config.binanceLiquidations,
+  });
+  orders = createOrderQueue({
+    db: ordersDb,
+    broker,
+    book: () => marketData.book(),
+    bookMaxAgeMs: config.strategy.runner.bookMaxAgeMs,
+    fillDelayMs: config.strategy.runner.fillDelayMs,
+    onSettled: (intent, patch) => decisionLog.applyExecution(intent.broker, intent.windowStart, intent.checkpoint, patch),
+    log: (message, meta) => logWarn(message, meta),
+  });
+  const recovered = orders.recover();
+  if (recovered.unknown > 0) console.warn(`有 ${recovered.unknown} 张单在上次退出时正在执行，状态记为 UNKNOWN，请到交易所对账`);
   runner = createStrategyRunner({
     judge,
     broker,
+    orders,
     decisions,
-    market: createStrategyMarketData({
-      feed,
-      quotes,
-      chainlink,
-      binance,
-      service,
-      clock,
-      liquidationsEnabled: config.binanceLiquidations,
-    }),
+    market: marketData,
     config: config.strategy.runner,
     enabled: config.strategy.autostart,
     onWindowOutcome: liveBroker ? (ws, outcome) => liveBroker.resolveWindow(ws, outcome) : undefined,
@@ -156,8 +198,9 @@ if (config.strategy.enabled) {
   strategyRoutes = {
     runner,
     decisions,
+    orders,
     adminToken: config.strategy.adminToken,
-    live: liveBroker && liveStore ? { broker: liveBroker, store: liveStore, geo } : null,
+    live: liveBroker && liveStore ? { broker: liveBroker, store: liveStore, geo, redeemer, redeemDisabledReason } : null,
   };
 }
 
@@ -168,6 +211,7 @@ if (needLivePrices) chainlink.start();
 feed.start();
 scheduler.start();
 runner?.start();
+redeemer?.start();
 
 await app.listen({ port: config.port, host: config.host });
 app.log.info(
@@ -177,7 +221,10 @@ app.log.info(
     strategy: config.strategy.enabled
       ? { judge: config.strategy.judge, broker: config.strategy.broker, autostart: config.strategy.autostart }
       : 'off',
-    live: config.strategy.broker === 'live' ? { dryRun: config.live.dryRun, db: config.live.dbPath } : 'off',
+    live:
+      config.strategy.enabled && config.strategy.broker === 'live'
+        ? { dryRun: config.live.dryRun, db: config.live.dbPath, autoRedeem: redeemer?.status().mode ?? 'off' }
+        : 'off',
   },
   'polymarket-predict backend 已启动',
 );
@@ -185,14 +232,18 @@ app.log.info(
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     runner?.stop();
+    redeemer?.stop();
     scheduler.stop();
     feed.stop();
     chainlink.stop();
     binance.stop();
-    void app.close().then(() => {
-      db.close();
-      liveStore?.close();
-      process.exit(0);
-    });
+    // 等手上的单执行完再关库，免得把 EXECUTING 的单留成 UNKNOWN
+    void (orders?.drain() ?? Promise.resolve())
+      .then(() => app.close())
+      .then(() => {
+        db.close();
+        liveStore?.close();
+        process.exit(0);
+      });
   });
 }
