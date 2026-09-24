@@ -87,6 +87,16 @@ export function registerPredictionRoutes(app: FastifyInstance, deps: RouteDeps):
 
   app.get('/api/prediction/quote', () => ({ quote: quotes.get(), serverTimeMs: clock.now() }));
 
+  /**
+   * 买入试算：不落库、不扣款。
+   * 前端「手续费/份数/预计收益」一律走这里，而不是在前端重写一遍费率公式——
+   * 两处各算一次，早晚会不一致，而不一致的费率就是错的钱。
+   */
+  app.get<{ Querystring: { side?: string; amount?: string } }>(
+    '/api/prediction/preview',
+    (req) => service.previewBuy(sideOf(req.query.side), amountOf(req.query.amount)),
+  );
+
   app.get('/api/prediction/price-history', () => {
     const from = clock.now() - 300_000;
     return { points: prices.since(from), latest: prices.latest() };

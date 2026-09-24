@@ -26,6 +26,60 @@ describe('GET /api/health', () => {
   });
 });
 
+describe('GET /api/prediction/preview：买入试算', () => {
+  it('给出成交价、份数、成本、手续费与预计收益', async () => {
+    const res = await t.app.inject({
+      method: 'GET',
+      url: '/api/prediction/preview?side=UP&amount=100',
+    });
+    assert.equal(res.statusCode, 200);
+    const body = res.json();
+    assert.equal(body.price, 0.5);
+    assert.equal(body.contracts, 200);
+    assert.equal(body.cost, 100);
+    assert.equal(body.fee, 3.5);
+    assert.equal(body.total, 103.5);
+    assert.equal(body.payout, 200);
+  });
+
+  it('试算不落库不扣款', async () => {
+    const before = h.bets.listByUser(31, 10, 0).total;
+    await t.app.inject({
+      method: 'GET',
+      url: '/api/prediction/preview?side=UP&amount=250',
+      headers: { 'x-user-id': '31' },
+    });
+    assert.equal(h.bets.listByUser(31, 10, 0).total, before);
+    assert.equal(h.accounts.find(31), null);
+  });
+
+  it('参数非法 → 400', async () => {
+    const bad = await t.app.inject({ method: 'GET', url: '/api/prediction/preview?side=X&amount=10' });
+    assert.equal(bad.statusCode, 400);
+    assert.equal(bad.json().error.code, 'SIDE_INVALID');
+
+    const amount = await t.app.inject({
+      method: 'GET',
+      url: '/api/prediction/preview?side=UP&amount=0',
+    });
+    assert.equal(amount.statusCode, 400);
+    assert.equal(amount.json().error.code, 'AMOUNT_INVALID');
+  });
+
+  it('盘口不可用 → 503', async () => {
+    const noQuote = makeApp(makeHarness({ book: null }));
+    try {
+      const res = await noQuote.app.inject({
+        method: 'GET',
+        url: '/api/prediction/preview?side=UP&amount=10',
+      });
+      assert.equal(res.statusCode, 503);
+    } finally {
+      await noQuote.close();
+    }
+  });
+});
+
 describe('GET /api/prediction/current', () => {
   it('返回当前回合与盘口', async () => {
     const res = await t.app.inject({ method: 'GET', url: '/api/prediction/current' });

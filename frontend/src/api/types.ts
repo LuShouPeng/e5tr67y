@@ -88,6 +88,19 @@ export interface PricePoint {
   price: number;
 }
 
+/** 买入试算结果（来自后端，前端不重算费率） */
+export interface BuyPlan {
+  /** 成交价（卖一） */
+  price: number;
+  contracts: number;
+  cost: number;
+  fee: number;
+  /** 实际扣款 = 成本 + 手续费 */
+  total: number;
+  /** 猜对时的回款 = 份数 × $1 */
+  payout: number;
+}
+
 export interface CurrentResponse {
   round: RoundView;
   quote: QuoteBook | null;

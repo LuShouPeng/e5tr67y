@@ -16,8 +16,14 @@ export interface FakeServer {
   rounds: unknown[];
   pnl: unknown;
   live: { rows: unknown[] };
+  /** 试算：默认按 50¢ 与 7% 费率实现，与后端公式一致，便于断言 */
+  previewImpl?: (side: string, amount: number) => unknown;
+  previewError?: { status: number; code: string } | null;
   buyImpl?: (side: string, amount: number) => unknown;
+  buyError?: { status: number; code: string } | null;
   sellImpl?: (betId: number, contracts?: number) => unknown;
+  sellError?: { status: number; code: string } | null;
+  calls: string[];
 }
 
 export function fakeServer(overrides: Partial<FakeServer> = {}): FakeServer {
@@ -43,6 +49,14 @@ export function fakeServer(overrides: Partial<FakeServer> = {}): FakeServer {
     rounds: [],
     pnl: {},
     live: { rows: [] },
+    calls: [],
+    previewImpl: (side, amount) => {
+      const price = side === 'UP' ? 0.5 : 0.5;
+      const contracts = Math.floor((amount / price) * 10_000) / 10_000;
+      const cost = Math.round(contracts * price * 10_000) / 10_000;
+      const fee = Math.round(contracts * 0.07 * price * (1 - price) * 10_000) / 10_000;
+      return { price, contracts, cost, fee, total: cost + fee, payout: contracts };
+    },
     ...overrides,
   };
 }
@@ -84,15 +98,16 @@ export function makeFakeClient(server: FakeServer): {
 
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
+    server.calls.push(url);
 
     const ok = (body: unknown): Response =>
       new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 
+    const fail = (status: number, code: string): Response =>
+      new Response(JSON.stringify({ error: { code, message: code } }), { status });
+
     if (server.failWith != null && url.includes('prediction/current')) {
-      return new Response(
-        JSON.stringify({ error: { code: server.failWith.code, message: 'x' } }),
-        { status: server.failWith.status },
-      );
+      return fail(server.failWith.status, server.failWith.code);
     }
 
     if (url.includes('prediction/current')) {
@@ -100,21 +115,28 @@ export function makeFakeClient(server: FakeServer): {
       return ok(server.current);
     }
     if (url.includes('price-history')) return ok(server.priceHistory);
+    if (url.includes('prediction/preview')) {
+      if (server.previewError != null) return fail(server.previewError.status, server.previewError.code);
+      const params = new URL(url, 'http://x').searchParams;
+      const side = params.get('side') ?? 'UP';
+      const amount = Number(params.get('amount') ?? 0);
+      return ok(server.previewImpl?.(side, amount) ?? {});
+    }
     if (url.includes('prediction/bets')) return ok({ rows: server.bets, total: server.bets.length, pageNum: 1, pageSize: 10 });
     if (url.includes('prediction/rounds')) return ok({ rows: server.rounds, total: server.rounds.length, pageNum: 1, pageSize: 10 });
     if (url.includes('prediction/pnl')) return ok(server.pnl);
     if (url.includes('prediction/live')) return ok(server.live);
     if (url.includes('/buy')) {
+      if (server.buyError != null) return fail(server.buyError.status, server.buyError.code);
       const body = JSON.parse(String(init?.body ?? '{}')) as { side: string; amount: number };
       return ok(server.buyImpl?.(body.side, body.amount) ?? { id: 1 });
     }
     if (url.includes('/sell/')) {
+      if (server.sellError != null) return fail(server.sellError.status, server.sellError.code);
       const contracts = new URL(url, 'http://x').searchParams.get('contracts');
-      return ok(
-        server.sellImpl?.(1, contracts == null ? undefined : Number(contracts)) ?? { id: 1 },
-      );
+      return ok(server.sellImpl?.(1, contracts == null ? undefined : Number(contracts)) ?? { id: 1 });
     }
-    return new Response(JSON.stringify({ error: { code: 'NOT_FOUND', message: url } }), { status: 404 });
+    return fail(404, 'NOT_FOUND');
   }) as unknown as typeof fetch;
 
   const client = createApiClient({
