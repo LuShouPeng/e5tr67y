@@ -1,6 +1,7 @@
 import type {
   ApiErrorBody,
   BetView,
+  BuyPlan,
   CurrentResponse,
   LiveBetView,
   MarketEvent,
@@ -54,6 +55,8 @@ export interface ApiClientOptions {
 export interface ApiClient {
   current(): Promise<CurrentResponse>;
   priceHistory(): Promise<{ points: PricePoint[]; latest: PricePoint | null }>;
+  /** 买入试算（不落库不扣款）：手续费与份数以后端为准，前端不重算费率 */
+  preview(side: Side, amount: number): Promise<BuyPlan>;
   buy(side: Side, amount: number): Promise<BetView>;
   sell(betId: number, contracts?: number): Promise<BetView>;
   bets(pageNum?: number, pageSize?: number): Promise<PageView<BetView>>;
@@ -110,6 +113,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
     priceHistory: () =>
       request<{ points: PricePoint[]; latest: PricePoint | null }>('/api/prediction/price-history'),
+
+    preview: (side, amount) =>
+      request<BuyPlan>(`/api/prediction/preview${qs({ side, amount })}`),
 
     buy: (side, amount) =>
       request<BetView>('/api/prediction/buy', {

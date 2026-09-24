@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { createApiClient, type ApiClient } from './api/client.ts';
 import type { Side } from './api/types.ts';
 import { ERROR_HINT } from './api/types.ts';
+import { BetTicket } from './components/BetTicket.tsx';
 import { OddsBoard } from './components/OddsBoard.tsx';
 import { RoundPanel } from './components/RoundPanel.tsx';
 import { usePredictionMarket } from './hooks/usePredictionMarket.ts';
@@ -17,7 +18,23 @@ const defaultClient = createApiClient();
 
 export function App({ client = defaultClient }: AppProps) {
   const [pick, setPick] = useState<Side>('UP');
+  const [balance, setBalance] = useState<number | null>(null);
   const market = usePredictionMarket(client);
+
+  // 余额只在回合切换或下单后刷新，不跟每秒心跳
+  const walletTick = `${market.round?.windowStart ?? ''}`;
+  useEffect(() => {
+    let alive = true;
+    void client
+      .pnl()
+      .then((data) => {
+        if (alive) setBalance(data.gameBalance);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [client, walletTick, market.activities.length]);
 
   return (
     <div className="shell">
@@ -78,14 +95,15 @@ export function App({ client = defaultClient }: AppProps) {
             </div>
           )}
 
-          <div className="card">
-            <div className="card-head">
-              <span className="card-title">下注</span>
-              <div className="topbar-spacer" />
-              <span className="badge">当前选择 {pick === 'UP' ? '看涨' : '看跌'}</span>
-            </div>
-            <div className="card-body muted">下注面板将在下一个迭代接入（S2-3）。</div>
-          </div>
+          <BetTicket
+            client={client}
+            side={pick}
+            onSideChange={setPick}
+            tradable={market.round?.status === 'OPEN'}
+            quoteStale={market.quoteStale}
+            balance={balance}
+            onSubmitted={() => void market.refresh()}
+          />
 
           <div className="card">
             <div className="card-head">

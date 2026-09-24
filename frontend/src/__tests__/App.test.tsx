@@ -58,7 +58,8 @@ describe('App：骨架与回合状态', () => {
     const { client } = makeFakeClient(fakeServer({ failWith: { status: 500, code: 'WEIRD_CODE' } }));
     render(<App client={client} />);
 
-    await waitFor(() => expect(screen.getByText('x')).toBeInTheDocument());
+    // ERROR_HINT 里没有这个码 → 直接用后端返回的 message（假后端把 code 当 message 回）
+    await waitFor(() => expect(screen.getByText('WEIRD_CODE')).toBeInTheDocument());
   });
 
   it('玩法说明里写明「相等算涨」与费率乘式', async () => {
@@ -70,13 +71,17 @@ describe('App：骨架与回合状态', () => {
     expect(screen.getByText(/份数 × 7% × 价格 × \(1 − 价格\)/)).toBeInTheDocument();
   });
 
-  it('点击赔率盘口的方向按钮会更新当前选择', async () => {
+  it('点击赔率盘口的方向按钮会同步到下注面板', async () => {
     const { client } = makeFakeClient(fakeServer());
     const { getByRole, getByText } = render(<App client={client} />);
     await waitFor(() => expect(getByText('可交易')).toBeInTheDocument());
 
-    // fireEvent 会把状态更新包进 act，避免 "not wrapped in act" 警告
+    // 下单面板的「看涨」默认选中
+    expect(getByRole('button', { name: '看涨' })).toHaveAttribute('aria-pressed', 'true');
+
     fireEvent.click(getByRole('button', { name: '下注跌' }));
-    await waitFor(() => expect(getByText('当前选择 看跌')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(getByRole('button', { name: '看跌' })).toHaveAttribute('aria-pressed', 'true'),
+    );
   });
 });
