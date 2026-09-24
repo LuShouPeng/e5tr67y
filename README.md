@@ -48,10 +48,29 @@ docker compose logs -f backend
 docker compose down          # 加 -v 连数据卷一起删
 ```
 
+## 自动策略（可选）
+
+移植了上游的 **Jev 预测员**：每 15 秒把盘面写成英文 state 问一次判官，判官决定买 UP、买 DOWN 或不买
+（持仓时决定拿着还是卖掉）。代码只负责拦机械问题，并在「价没变差」时才成交。
+
+| 变量 | 可选值 |
+| --- | --- |
+| `STRATEGY_JUDGE` | `math`（随机游走基线，不需要 key）/ `jev`（TypeSafe Jev，`JEV_API_KEY`）/ `claude`（Anthropic，`ANTHROPIC_API_KEY`） |
+| `STRATEGY_BROKER` | `paper`（模拟盘：虚拟资金，机器人账户）/ `live`（Polymarket 实盘：独立库、风控、默认 dry-run） |
+
+```bash
+STRATEGY_ENABLED=true STRATEGY_JUDGE=math STRATEGY_BROKER=paper STRATEGY_ADMIN_TOKEN=secret npm run dev
+curl -XPOST localhost:8787/api/strategy/switch -H 'x-admin-token: secret' -H 'content-type: application/json' -d '{"on":true}'
+curl localhost:8787/api/strategy/status
+```
+
+实盘只在 Polymarket 允许的地区可用：下单前调用官方 geoblock 接口，受限或检查失败一律拒单。
+本项目不支持任何绕过地域限制的方式。完整说明、风控、数据源评估见 [`docs/strategy.md`](docs/strategy.md)。
+
 ## 测试
 
 ```bash
-cd backend  && npm test        # node:test，245 例
+cd backend  && npm test        # node:test，289 例
 cd frontend && npm test        # vitest，127 例
 ```
 
@@ -76,7 +95,10 @@ backend/
   src/domain/     窗口、费率、报价与结算的纯函数（可测试核心）
   src/infra/      SQLite 建表与仓储
   src/services/   下单、卖出、结算、盈亏编排
-  src/market/     Polymarket Gamma / CLOB / crypto-price 接入与降级
+  src/market/     Polymarket Gamma / CLOB / crypto-price / Chainlink 实时流、Binance 行情接入与降级
+  src/strategy/   自动策略：公平价模型、state、判官（math / jev / claude）、检查点回路
+  src/execution/  下单通道接口与模拟盘通道
+  src/live/       Polymarket 实盘通道：CLOB 客户端、独立账本、地域检查、风控
   src/http/       Fastify 路由与 SSE 推送
 frontend/
   src/hooks/      回合与盘口订阅
@@ -84,6 +106,7 @@ frontend/
 docs/
   backlog.md      产品待办与验收标准
   architecture.md 架构与数据流
+  strategy.md     自动策略、模拟盘 / 实盘分离、数据源评估
 ```
 
 ## 归属声明

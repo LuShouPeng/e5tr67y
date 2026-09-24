@@ -15,7 +15,8 @@ COPY src ./src
 ENV NODE_ENV=production \
     PORT=8787 \
     HOST=0.0.0.0 \
-    WIIB_DB=/data/prediction.sqlite
+    WIIB_DB=/data/prediction.sqlite \
+    LIVE_DB=/data/live.sqlite
 
 RUN mkdir -p /data
 VOLUME ["/data"]

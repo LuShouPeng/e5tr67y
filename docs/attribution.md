@@ -27,8 +27,11 @@ Copyright (c) 2026 mamawai
 
 - **没有复制上游源码**：上游是 Java（Spring Boot + MyBatis-Plus + Redis + PostgreSQL）与
   React 应用；本项目是独立的 Node/TypeScript + SQLite + React 实现，分层、命名与并发模型均不同。
-- 未包含上游的 AI 交易员（Jev）、量化策略、新闻/财经日历、游戏（21 点、视频扑克、翻牌）、
+- 未包含上游的合约 AI 交易员、合约量化策略（turtle / smc / fibo / sqzmom）、新闻/财经日历、游戏（21 点、视频扑克、翻牌）、
   排行榜与真实登录体系——这些不属于「预测」玩法。
+- 上游的 **Jev 预测员**（`wiib-agent/.../prediction/`：`PredictionModel`、`PredictionStateWriter`、
+  `PredictionQuestions`、`PredictionRules`、`JevPredictionRunner`、`JevClient`）已按其逻辑用 TypeScript 重写到
+  `backend/src/strategy/`，详见 `docs/strategy.md`。
 - 未使用上游的 WebSocket 推送方案，改为 SSE + REST 轮询。
 
 ## 合规说明

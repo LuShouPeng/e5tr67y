@@ -54,6 +54,11 @@
 | 目标价 / 结算价 | `polymarket.com/api/crypto/crypto-price`（`twapEnabled=true&twapLookbackSeconds=60`） | 取不到价 → 回合 `VOID` 退本金 |
 | UP/DOWN 盘口 | Gamma `events/slug/btc-updown-5m-{windowStart}` → `clobTokenIds` → CLOB 买一卖一 | 上游不可达 → 本地模拟盘口（随机游走 + 均值回归），保证可离线演示与测试 |
 
+| BTC 逐秒现货（策略用） | Polymarket RTDS `wss://ws-live-data.polymarket.com` 的 `crypto_prices_chainlink` | 断流 5 秒以上策略不下单（`STALE_CHAINLINK`） |
+| 波动 / 逐笔 / 强平（策略用） | Binance `klines`、`aggTrades`、合约 `forceOrder` | 缺哪段 state 里就不写哪段；K 线缺失则不下单 |
+
+自动策略、模拟盘 / 实盘分离与数据源评估见 [`strategy.md`](./strategy.md)。
+
 `market/` 所有出网调用都包了超时与 `null` 降级：**拿不到价不算错，算「没有报价」**，
 调用方据此拒绝下单或作废回合，绝不会用脏数据成交。
 

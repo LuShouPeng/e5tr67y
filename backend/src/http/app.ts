@@ -8,9 +8,12 @@ import type { EventBus } from '../services/eventBus.ts';
 import type { PredictionService } from '../services/predictionService.ts';
 import { toHttpError } from './errors.ts';
 import { registerPredictionRoutes, type RouteDeps } from './routes/prediction.ts';
+import { registerStrategyRoutes, type StrategyRouteDeps } from './routes/strategy.ts';
 
 export interface BuildAppOptions extends RouteDeps {
   logger?: boolean;
+  /** 开了自动策略才有：策略状态、决策日志，以及（实盘时）实盘账本 */
+  strategy?: StrategyRouteDeps | null;
 }
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
@@ -32,6 +35,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   });
 
   registerPredictionRoutes(app, options);
+  if (options.strategy) registerStrategyRoutes(app, options.strategy);
   return app;
 }
 
