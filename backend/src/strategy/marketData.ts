@@ -28,6 +28,7 @@ export function createStrategyMarketData(deps: {
       // 逐笔流 30 秒没更新就当不新鲜
       return m != null && nowMs - m.lastTradeMs <= 30_000 ? m : null;
     },
+    // 没开强平流、流没连上、或连上晚于窗口开始：都回 null，state 里不写强平
     liquidationsSince: (fromMs) => (deps.liquidationsEnabled ? binance.liquidationsSince(fromMs) : null),
     book() {
       const b = quotes.get();

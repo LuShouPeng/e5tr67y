@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS strategy_decision (
   latency_ms    INTEGER,
   input_tokens  INTEGER,
   rationale     TEXT,
+  answers_json  TEXT,
   state_json    TEXT    NOT NULL DEFAULT '{}',
   error         TEXT,
   outcome       TEXT,
@@ -69,6 +70,7 @@ export interface DecisionRow {
   latencyMs: number | null;
   inputTokens: number | null;
   rationale: string | null;
+  answersJson: string | null;
   stateJson: string;
   error: string | null;
   outcome: string | null;
@@ -81,7 +83,7 @@ const COLUMNS: [keyof DecisionRow, string][] = [
   ['pMkt', 'p_mkt'], ['judgeChoice', 'judge_choice'], ['judgeChoiceP', 'judge_choice_p'], ['edge', 'edge'],
   ['upAsk', 'up_ask'], ['upBid', 'up_bid'], ['downAsk', 'down_ask'], ['downBid', 'down_bid'], ['fillId', 'fill_id'],
   ['stake', 'stake'], ['shares', 'shares'], ['avgPrice', 'avg_price'], ['model', 'model'], ['latencyMs', 'latency_ms'],
-  ['inputTokens', 'input_tokens'], ['rationale', 'rationale'], ['stateJson', 'state_json'], ['error', 'error'],
+  ['inputTokens', 'input_tokens'], ['rationale', 'rationale'], ['answersJson', 'answers_json'], ['stateJson', 'state_json'], ['error', 'error'],
   ['outcome', 'outcome'], ['pnl', 'pnl'],
 ];
 
@@ -98,6 +100,25 @@ export interface DecisionRepo {
   /** 还没回填结果、窗口已结束的行 */
   pendingSettle(broker: string, beforeWindowStart: number, sinceWindowStart: number): DecisionRow[];
   fill(id: number, outcome: string | null, pnl: number | null): void;
+  /**
+   * 异步下单有结果后回写执行结果。
+   * `keepReason` 为 true（成交）时保留判官那句「BUY UP 0.800 ask 0.56」、把执行结果接在后面，
+   * 首词仍是 BUY / SELL；否则整句换成 MISSED / NO_BALANCE 等（与上游 reason 首词约定一致）。
+   */
+  applyExecution(
+    broker: string,
+    windowStart: number,
+    checkpoint: string,
+    patch: {
+      action?: string;
+      reason: string;
+      keepReason?: boolean;
+      fillId?: string | null;
+      stake?: number | null;
+      shares?: number | null;
+      avgPrice?: number | null;
+    },
+  ): void;
   /** 买入行的战绩汇总 */
   summary(broker: string): { decisions: number; bets: number; settledBets: number; wins: number; pnl: number };
 }
@@ -131,6 +152,18 @@ export function createDecisionRepo(db: DatabaseSync): DecisionRepo {
     },
     fill(id, outcome, pnl) {
       db.prepare('UPDATE strategy_decision SET outcome = COALESCE(?, outcome), pnl = COALESCE(?, pnl) WHERE id = ?').run(outcome, pnl, id);
+    },
+    applyExecution(broker, ws, cp, patch) {
+      db.prepare(
+        `UPDATE strategy_decision SET action = COALESCE(?, action),
+           reason = CASE WHEN ? = 1 AND reason LIKE 'QUEUED %' THEN substr(reason, 8) || ' | ' || ? ELSE ? END,
+           fill_id = COALESCE(?, fill_id), stake = COALESCE(?, stake), shares = COALESCE(?, shares), avg_price = COALESCE(?, avg_price)
+         WHERE broker = ? AND window_start = ? AND checkpoint = ?`,
+      ).run(
+        patch.action ?? null, patch.keepReason ? 1 : 0, patch.reason, patch.reason,
+        patch.fillId ?? null, patch.stake ?? null, patch.shares ?? null, patch.avgPrice ?? null,
+        broker, ws, cp,
+      );
     },
     summary(broker) {
       const r = db

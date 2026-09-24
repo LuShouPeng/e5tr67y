@@ -8,10 +8,13 @@ import {
   gammaEventUrl,
   parseBook,
   parseCryptoPrice,
+  parseGammaMarketMeta,
   parseGammaTokens,
+  type MarketMeta,
   parseHttpDateMs,
 } from './polymarket.ts';
 import { createSimulatedMarket, type SimulatedMarket } from './simulated.ts';
+import type { ClobBookStream, StreamBook } from './clobStream.ts';
 import type { Clock } from '../services/clock.ts';
 import type { EventBus } from '../services/eventBus.ts';
 import type { PredictionService, SettlePrices } from '../services/predictionService.ts';
@@ -57,6 +60,12 @@ export interface FeedOptions {
   log?: (message: string, meta?: Record<string, unknown>) => void;
   /** 另有逐秒现货（Chainlink 流）写价格序列时置 true，这里就不再把开盘均价塞进曲线 */
   externalPriceHistory?: boolean;
+  /**
+   * CLOB 盘口 WebSocket。给了就由它实时推盘口（需把它的 onBook 接到 `applyStreamBook`），
+   * 轮询只负责订阅当前窗口的 token；流里的盘口超过 `streamMaxAgeMs` 没确认才退回 REST 拉账本。
+   */
+  bookStream?: ClobBookStream;
+  streamMaxAgeMs?: number;
 }
 
 export interface MarketFeed {
@@ -67,8 +76,10 @@ export interface MarketFeed {
   status(): FeedStatus;
   /** 供结算使用：该窗口已知的开收盘价（缺则 null） */
   settlePrices(windowStart: number): SettlePrices | null;
-  /** 该窗口 UP / DOWN 的 CLOB token（实盘下单用）；还没解析到为 null */
-  tokens(windowStart: number): { upTokenId: string | null; downTokenId: string | null } | null;
+  /** CLOB 流推来的盘口：只收当前窗口、只在真盘模式下写入 */
+  applyStreamBook(book: StreamBook): void;
+  /** 该窗口 UP / DOWN 的 CLOB token 与 conditionId（实盘下单、领奖用）；还没解析到为 null */
+  tokens(windowStart: number): ({ upTokenId: string | null; downTokenId: string | null } & Partial<MarketMeta>) | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 6000;
@@ -104,7 +115,7 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
   let mode: Exclude<FeedMode, 'auto'> = options.mode === 'simulated' ? 'simulated' : 'polymarket';
   const requestedMode: FeedMode = options.mode ?? 'polymarket';
 
-  const tokenCache = new Map<number, { upTokenId: string | null; downTokenId: string | null }>();
+  const tokenCache = new Map<number, { upTokenId: string | null; downTokenId: string | null } & Partial<MarketMeta>>();
   const priceCache = new Map<number, SettlePrices>();
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
@@ -192,15 +203,27 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
     let tokens = tokenCache.get(windowStart);
     if (tokens == null) {
       const event = await getJson(gammaEventUrl(windowStart));
-      tokens = parseGammaTokens(event.json, eventSlug(windowStart)) ?? {
-        upTokenId: null,
-        downTokenId: null,
+      tokens = {
+        ...(parseGammaTokens(event.json, eventSlug(windowStart)) ?? { upTokenId: null, downTokenId: null }),
+        ...(parseGammaMarketMeta(event.json, eventSlug(windowStart)) ?? {}),
       };
       tokenCache.set(windowStart, tokens);
     }
 
     let quote: FeedSnapshot['quote'] = null;
-    if (tokens.upTokenId != null && tokens.downTokenId != null) {
+    let bookTs = nowMs;
+    const stream = options.bookStream;
+    if (stream && tokens.upTokenId != null && tokens.downTokenId != null) {
+      stream.subscribe(windowStart, tokens.upTokenId, tokens.downTokenId);
+    }
+    const streamed = stream?.current();
+    const streamFresh =
+      streamed != null && streamed.windowStart === windowStart && clock.now() - streamed.ts <= (options.streamMaxAgeMs ?? 5_000);
+    if (streamFresh) {
+      // 盘口由流实时写入（applyStreamBook），这里不再拉账本
+      bookTs = streamed.ts;
+      quote = { upBid: streamed.upBid, upAsk: streamed.upAsk, downBid: streamed.downBid, downAsk: streamed.downAsk };
+    } else if (tokens.upTokenId != null && tokens.downTokenId != null) {
       const [upBook, downBook] = await Promise.all([
         getJson(clobBookUrl(tokens.upTokenId)),
         getJson(clobBookUrl(tokens.downTokenId)),
@@ -208,12 +231,15 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       const up = parseBook(upBook.json);
       const down = parseBook(downBook.json);
       if (up != null && down != null) {
+        // 时间戳取拿到盘口的这一刻：这轮刷新前面还串行请求了开收盘价与 Gamma，用开始时刻会把盘口平白记老一两秒，
+        // 策略按盘口年龄拒单，差这一两秒就是 STALE_BOOK 与不 STALE 的区别
+        bookTs = clock.now();
         quotes.set({
           upBid: up.bid,
           upAsk: up.ask,
           downBid: down.bid,
           downAsk: down.ask,
-          ts: nowMs,
+          ts: bookTs,
         });
         quote = { upBid: up.bid, upAsk: up.ask, downBid: down.bid, downAsk: down.ask };
       }
@@ -226,7 +252,7 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       quote,
       degraded: false,
     };
-    options.events?.publish('market', { ...(quote ?? {}), ts: nowMs, degraded: false });
+    options.events?.publish('market', { ...(quote ?? {}), ts: bookTs, degraded: false });
     return snapshot;
   }
 
@@ -283,6 +309,14 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       timer = null;
     },
     status: () => ({ ...status }),
+    applyStreamBook(book) {
+      if (mode !== 'polymarket') return;
+      if (book.windowStart !== currentWindowStart(clock.now())) return;
+      quotes.set({ upBid: book.upBid, upAsk: book.upAsk, downBid: book.downBid, downAsk: book.downAsk, ts: book.ts });
+      options.events?.publish('market', {
+        upBid: book.upBid, upAsk: book.upAsk, downBid: book.downBid, downAsk: book.downAsk, ts: book.ts, degraded: false,
+      });
+    },
     tokens(windowStart) {
       return tokenCache.get(windowStart) ?? null;
     },

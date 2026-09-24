@@ -52,7 +52,7 @@
 | 用途 | 上游 | 降级 |
 | --- | --- | --- |
 | 目标价 / 结算价 | `polymarket.com/api/crypto/crypto-price`（`twapEnabled=true&twapLookbackSeconds=60`） | 取不到价 → 回合 `VOID` 退本金 |
-| UP/DOWN 盘口 | Gamma `events/slug/btc-updown-5m-{windowStart}` → `clobTokenIds` → CLOB 买一卖一 | 上游不可达 → 本地模拟盘口（随机游走 + 均值回归），保证可离线演示与测试 |
+| UP/DOWN 盘口 | Gamma `events/slug/btc-updown-5m-{windowStart}` → `clobTokenIds` → CLOB market 频道 WebSocket 实时推买一卖一（流断开时 REST 拉账本兜底） | 上游不可达 → 本地模拟盘口（随机游走 + 均值回归），保证可离线演示与测试 |
 
 | BTC 逐秒现货（策略用） | Polymarket RTDS `wss://ws-live-data.polymarket.com` 的 `crypto_prices_chainlink` | 断流 5 秒以上策略不下单（`STALE_CHAINLINK`） |
 | 波动 / 逐笔 / 强平（策略用） | Binance `klines`、`aggTrades`、合约 `forceOrder` | 缺哪段 state 里就不写哪段；K 线缺失则不下单 |

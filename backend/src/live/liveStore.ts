@@ -46,7 +46,23 @@ CREATE INDEX IF NOT EXISTS idx_live_order_ws ON live_order(window_start);
 CREATE INDEX IF NOT EXISTS idx_live_pos_status ON live_position(status, window_start);
 `;
 
+/** 后加的列：老库启动时补齐（SQLite 没有 ADD COLUMN IF NOT EXISTS） */
+const POSITION_MIGRATIONS: [column: string, ddl: string][] = [
+  ['condition_id', 'ALTER TABLE live_position ADD COLUMN condition_id TEXT'],
+  ['neg_risk', 'ALTER TABLE live_position ADD COLUMN neg_risk INTEGER NOT NULL DEFAULT 0'],
+  ['redeem_status', 'ALTER TABLE live_position ADD COLUMN redeem_status TEXT'],
+  ['redeem_tx', 'ALTER TABLE live_position ADD COLUMN redeem_tx TEXT'],
+  ['redeem_error', 'ALTER TABLE live_position ADD COLUMN redeem_error TEXT'],
+  ['redeem_attempts', 'ALTER TABLE live_position ADD COLUMN redeem_attempts INTEGER NOT NULL DEFAULT 0'],
+];
+
 export type LivePositionStatus = 'OPEN' | 'SOLD' | 'WON' | 'LOST';
+/**
+ * 领奖状态（只对 WON 有意义）：
+ * PENDING 等链上结算 / 待提交；REDEEMED 已领；FAILED 本次失败会重试；
+ * MANUAL 本进程领不了（没配 relayer 凭据、neg-risk 市场、缺 conditionId、重试次数用完），需到 Polymarket 网页手动领。
+ */
+export type RedeemStatus = 'PENDING' | 'REDEEMED' | 'FAILED' | 'MANUAL';
 
 export interface LiveOrderRow {
   id: number;
@@ -76,6 +92,12 @@ export interface LivePositionRow {
   status: LivePositionStatus;
   payout: number | null;
   dryRun: boolean;
+  conditionId: string | null;
+  negRisk: boolean;
+  redeemStatus: RedeemStatus | null;
+  redeemTx: string | null;
+  redeemError: string | null;
+  redeemAttempts: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -83,7 +105,17 @@ export interface LivePositionRow {
 export interface LiveStore {
   readonly db: DatabaseSync;
   recordOrder(o: Omit<LiveOrderRow, 'id'>): LiveOrderRow;
-  openPosition(p: { windowStart: number; side: Side; tokenId: string; shares: number; cost: number; dryRun: boolean; nowMs: number }): LivePositionRow;
+  openPosition(p: {
+    windowStart: number;
+    side: Side;
+    tokenId: string;
+    shares: number;
+    cost: number;
+    dryRun: boolean;
+    nowMs: number;
+    conditionId?: string | null;
+    negRisk?: boolean;
+  }): LivePositionRow;
   closePosition(id: number, proceeds: number, nowMs: number): void;
   /** 部分卖出：份额减少、所得累加，仓位仍 OPEN；最终盈亏 = 累计所得 + 派彩 − 成本 */
   partialSell(id: number, soldShares: number, proceeds: number, nowMs: number): void;
@@ -97,6 +129,9 @@ export interface LiveStore {
   realizedSince(fromMs: number, includeDryRun: boolean): number;
   /** 未了结仓位的成本合计 */
   openCost(includeDryRun: boolean): number;
+  /** 赢了、真单、还没领完的仓位 */
+  redeemable(maxAttempts: number): LivePositionRow[];
+  markRedeem(ids: number[], status: RedeemStatus, nowMs: number, detail?: { tx?: string | null; error?: string | null; attempted?: boolean }): void;
   close(): void;
 }
 
@@ -131,6 +166,12 @@ function toPosition(r: Record<string, unknown>): LivePositionRow {
     status: r.status as LivePositionStatus,
     payout: r.payout == null ? null : Number(r.payout),
     dryRun: Number(r.dry_run) === 1,
+    conditionId: r.condition_id == null ? null : String(r.condition_id),
+    negRisk: Number(r.neg_risk) === 1,
+    redeemStatus: r.redeem_status == null ? null : (r.redeem_status as RedeemStatus),
+    redeemTx: r.redeem_tx == null ? null : String(r.redeem_tx),
+    redeemError: r.redeem_error == null ? null : String(r.redeem_error),
+    redeemAttempts: Number(r.redeem_attempts ?? 0),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
   };
@@ -140,6 +181,8 @@ export function openLiveStore(location = ':memory:', extraSchema = ''): LiveStor
   const db = new DatabaseSync(location);
   if (location !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
   db.exec(LIVE_SCHEMA);
+  const existing = new Set((db.prepare('PRAGMA table_info(live_position)').all() as { name: string }[]).map((c) => c.name));
+  for (const [column, ddl] of POSITION_MIGRATIONS) if (!existing.has(column)) db.exec(ddl);
   if (extraSchema) db.exec(extraSchema);
 
   const insertOrder = db.prepare(
@@ -147,8 +190,8 @@ export function openLiveStore(location = ':memory:', extraSchema = ''): LiveStor
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertPos = db.prepare(
-    `INSERT INTO live_position (window_start, side, token_id, shares, cost, dry_run, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO live_position (window_start, side, token_id, shares, cost, dry_run, condition_id, neg_risk, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const byId = db.prepare('SELECT * FROM live_position WHERE id = ?');
   const openFor = db.prepare("SELECT * FROM live_position WHERE window_start = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1");
@@ -164,7 +207,10 @@ export function openLiveStore(location = ':memory:', extraSchema = ''): LiveStor
       return { ...o, id: Number(info.lastInsertRowid) };
     },
     openPosition(p) {
-      const info = insertPos.run(p.windowStart, p.side, p.tokenId, p.shares, p.cost, p.dryRun ? 1 : 0, p.nowMs, p.nowMs);
+      const info = insertPos.run(
+        p.windowStart, p.side, p.tokenId, p.shares, p.cost, p.dryRun ? 1 : 0,
+        p.conditionId ?? null, p.negRisk ? 1 : 0, p.nowMs, p.nowMs,
+      );
       return toPosition(byId.get(Number(info.lastInsertRowid)) as Record<string, unknown>);
     },
     closePosition(id, proceeds, nowMs) {
@@ -176,9 +222,12 @@ export function openLiveStore(location = ':memory:', extraSchema = ''): LiveStor
       ).run(soldShares, proceeds, nowMs, id);
     },
     resolvePosition(id, won, nowMs) {
+      // 赢的真单进入待领奖；dry-run 没有链上份额，不领
       db.prepare(
-        "UPDATE live_position SET status = ?, payout = CASE WHEN ? = 1 THEN shares ELSE 0 END, updated_at = ? WHERE id = ? AND status = 'OPEN'",
-      ).run(won ? 'WON' : 'LOST', won ? 1 : 0, nowMs, id);
+        `UPDATE live_position SET status = ?, payout = CASE WHEN ? = 1 THEN shares ELSE 0 END,
+           redeem_status = CASE WHEN ? = 1 AND dry_run = 0 THEN 'PENDING' ELSE NULL END, updated_at = ?
+         WHERE id = ? AND status = 'OPEN'`,
+      ).run(won ? 'WON' : 'LOST', won ? 1 : 0, won ? 1 : 0, nowMs, id);
     },
     position(id) {
       const r = byId.get(id) as Record<string, unknown> | undefined;
@@ -211,6 +260,23 @@ export function openLiveStore(location = ':memory:', extraSchema = ''): LiveStor
         .prepare("SELECT COALESCE(SUM(cost), 0) AS c FROM live_position WHERE status = 'OPEN' AND (? = 1 OR dry_run = 0)")
         .get(includeDryRun ? 1 : 0) as Record<string, unknown>;
       return Number(row.c);
+    },
+    redeemable(maxAttempts) {
+      return (
+        db
+          .prepare(
+            `SELECT * FROM live_position WHERE status = 'WON' AND dry_run = 0
+             AND redeem_status IN ('PENDING', 'FAILED') AND redeem_attempts < ? ORDER BY window_start ASC`,
+          )
+          .all(maxAttempts) as Record<string, unknown>[]
+      ).map(toPosition);
+    },
+    markRedeem(ids, status, nowMs, detail = {}) {
+      const stmt = db.prepare(
+        `UPDATE live_position SET redeem_status = ?, redeem_tx = COALESCE(?, redeem_tx), redeem_error = ?,
+           redeem_attempts = redeem_attempts + ?, updated_at = ? WHERE id = ?`,
+      );
+      for (const id of ids) stmt.run(status, detail.tx ?? null, detail.error ?? null, detail.attempted ? 1 : 0, nowMs, id);
     },
     close() {
       db.close();

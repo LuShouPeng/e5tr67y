@@ -51,7 +51,7 @@ docker compose down          # 加 -v 连数据卷一起删
 ## 自动策略（可选）
 
 移植了上游的 **Jev 预测员**：每 15 秒把盘面写成英文 state 问一次判官，判官决定买 UP、买 DOWN 或不买
-（持仓时决定拿着还是卖掉）。代码只负责拦机械问题，并在「价没变差」时才成交。
+（持仓时决定拿着还是卖掉）。代码只负责拦机械问题；下单走异步队列，「价没变差」才成交；实盘赢了自动在链上领奖。
 
 | 变量 | 可选值 |
 | --- | --- |
@@ -70,7 +70,7 @@ curl localhost:8787/api/strategy/status
 ## 测试
 
 ```bash
-cd backend  && npm test        # node:test，289 例
+cd backend  && npm test        # node:test，309 例
 cd frontend && npm test        # vitest，127 例
 ```
 

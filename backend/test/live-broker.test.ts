@@ -32,7 +32,8 @@ function fakeClob(responses: unknown[], calls: Call[] = [], signed: Call[] = [])
 
 const allowed = { ensure: async () => ({ allowed: true, checkedAtMs: 0, country: 'XX', region: null, reason: null }), status: () => ({ allowed: true, checkedAtMs: 0, country: 'XX', region: null, reason: null }) };
 const risk = { maxStakeUsd: 5, maxOpenCostUsd: 20, maxDailyLossUsd: 10 };
-const tokens = () => ({ upTokenId: 'tok-up', downTokenId: 'tok-down' });
+const COND = `0x${'c'.repeat(64)}`;
+const tokens = () => ({ upTokenId: 'tok-up', downTokenId: 'tok-down', conditionId: COND, negRisk: false });
 
 function broker(clob: ClobLike, overrides: Partial<Parameters<typeof createLiveBroker>[0]> = {}) {
   const store = openLiveStore(':memory:');
@@ -53,6 +54,8 @@ describe('实盘通道', () => {
     const pos = await b.position(WS);
     assert.equal(pos!.side, 'UP');
     assert.equal(store.recentOrders(5)[0]!.orderId, 'o1');
+    // 领奖要用的 conditionId 在建仓时就记下
+    assert.equal(store.position(Number(pos!.id))!.conditionId, COND);
     assert.equal(await b.balance(), 123.45);
   });
 

@@ -31,6 +31,8 @@ export interface ClobLike {
 export interface WindowTokens {
   upTokenId: string | null;
   downTokenId: string | null;
+  conditionId?: string | null;
+  negRisk?: boolean;
 }
 
 export interface LiveRiskConfig {
@@ -173,7 +175,11 @@ export function createLiveBroker(options: LiveBrokerOptions): LiveBroker {
         windowStart: req.windowStart, side: req.side, tokenId, action: 'BUY', amount: stake, priceLimit: req.maxPrice,
         shares, usdc, orderId, status, dryRun, error: null, createdAt: t,
       });
-      const pos = store.openPosition({ windowStart: req.windowStart, side: req.side, tokenId, shares, cost: usdc, dryRun, nowMs: t });
+      const meta = options.tokens(req.windowStart);
+      const pos = store.openPosition({
+        windowStart: req.windowStart, side: req.side, tokenId, shares, cost: usdc, dryRun, nowMs: t,
+        conditionId: meta?.conditionId ?? null, negRisk: meta?.negRisk ?? false,
+      });
       return { id: String(pos.id), side: req.side, contracts: shares, avgPrice: usdc / shares, amount: usdc, dryRun };
     },
 

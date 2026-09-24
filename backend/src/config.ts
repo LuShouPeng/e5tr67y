@@ -16,6 +16,7 @@ export interface AppConfig {
   dbPath: string;
   feedMode: FeedMode;
   feedPollMs: number;
+  clobWs: boolean;
   binanceApiBase: string | undefined;
   binanceLiquidations: boolean;
   strategy: {
@@ -40,6 +41,10 @@ export interface AppConfig {
     maxStakeUsd: number;
     maxOpenCostUsd: number;
     maxDailyLossUsd: number;
+    autoRedeem: boolean;
+    polygonRpcUrl: string | undefined;
+    relayerUrl: string | undefined;
+    builderCreds: { key: string; secret: string; passphrase: string } | null;
   };
 }
 
@@ -98,6 +103,9 @@ export function loadConfig(env: Env = process.env): AppConfig {
   const apiSecret = str(env, 'POLY_API_SECRET');
   const apiPass = str(env, 'POLY_API_PASSPHRASE');
   const signatureType = number(env, 'POLY_SIGNATURE_TYPE', 0, 0, 2);
+  const builderKey = str(env, 'POLY_BUILDER_API_KEY');
+  const builderSecret = str(env, 'POLY_BUILDER_SECRET');
+  const builderPass = str(env, 'POLY_BUILDER_PASSPHRASE');
 
   const cfg: AppConfig = {
     port: number(env, 'PORT', 8787, 1, 65535),
@@ -105,6 +113,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
     dbPath: str(env, 'WIIB_DB') ?? 'data/prediction.sqlite',
     feedMode,
     feedPollMs: number(env, 'FEED_POLL_MS', 5000, 1000, 60_000),
+    clobWs: bool(env, 'CLOB_WS', true),
     binanceApiBase: str(env, 'BINANCE_API_BASE'),
     binanceLiquidations: bool(env, 'BINANCE_LIQUIDATIONS', true),
     strategy: {
@@ -139,6 +148,11 @@ export function loadConfig(env: Env = process.env): AppConfig {
       maxStakeUsd: number(env, 'LIVE_MAX_STAKE_USD', 5, 1, 100_000),
       maxOpenCostUsd: number(env, 'LIVE_MAX_OPEN_COST_USD', 20, 1, 1_000_000),
       maxDailyLossUsd: number(env, 'LIVE_MAX_DAILY_LOSS_USD', 20, 1, 1_000_000),
+      autoRedeem: bool(env, 'LIVE_AUTO_REDEEM', true),
+      polygonRpcUrl: str(env, 'POLYGON_RPC_URL'),
+      relayerUrl: str(env, 'POLY_RELAYER_URL'),
+      builderCreds:
+        builderKey && builderSecret && builderPass ? { key: builderKey, secret: builderSecret, passphrase: builderPass } : null,
     },
   };
 

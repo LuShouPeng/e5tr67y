@@ -53,9 +53,44 @@
   3. **dry-run**：`LIVE_DRY_RUN` 默认 `true`，只签名不提交，账本照记（`dry_run=1`）。确认一切正常再显式关掉。
 - 下单方式：FAK 市价单带价格上 / 下限，吃得到限价以内的就成交、剩下的撤掉，等价于上游「价没变差才成交」。
 
+### 异步下单
+
+判官拍板后，回路只往下单队列（`order_intent` 表，和所用通道同库）挂一张单据就返回，不等成交：
+
+```
+检查点 → 问判官 → 决策落库（reason: QUEUED …）→ 挂单 ──┐
+                                                      ▼
+                    执行器（每个通道串行）：等 fill-delay → 复核盘口（价变差 → MISSED）
+                    → 按当时余额重算本金 → 下单 → 结果回写决策（action / 成交价 / 份额）
+```
+
+- 单据状态：`QUEUED → EXECUTING → FILLED / MISSED / REJECTED / EXPIRED / FAILED`。
+- 同一窗口还有没执行完的单时，后面的检查点不问判官，记 `ORDER_PENDING`，不会重复下单。
+- 过了开盘后 285 秒还没执行的单记 `EXPIRED`，避免撞上锁盘。
+- 进程重启：残留的 `QUEUED` 作废；残留的 `EXECUTING` 记 `UNKNOWN`（可能已提交到交易所），需要人工对账。正常退出（SIGINT / SIGTERM）会先等队列跑完再关库。
+- 查看：`GET /api/strategy/orders`。
+
+### 自动领奖（redeem）
+
+窗口结算后，赢的真单仓位记为 `WON` 且 `redeem_status = PENDING`。领奖器每分钟跑一轮：
+
+1. 按 `conditionId`（建仓时从 Gamma 记下）分组，一次 `redeemPositions` 领掉该市场的全部份额；
+2. 先读链上 CTF 合约的 `payoutDenominator`，市场还没在链上结算就等下一轮，不算失败；
+3. 交易上链成功才记 `REDEEMED` 并保存交易哈希；失败记 `FAILED` 重试，5 次后转 `MANUAL`。
+
+| 钱包（`POLY_SIGNATURE_TYPE`） | 领奖方式 | 需要 |
+| --- | --- | --- |
+| 0 普通钱包 | 私钥地址直接调 CTF `redeemPositions` | 钱包里少量 POL 付 gas |
+| 1 邮箱 / Magic 代理钱包 | Polymarket 官方 relayer（PROXY） | Builder API 凭据，免 gas |
+| 2 浏览器钱包的 Safe | Polymarket 官方 relayer（SAFE） | Builder API 凭据，免 gas |
+
+- dry-run 的仓位没有链上份额，不领；输的仓位份额归零，不用领。
+- 缺 `conditionId` 或 neg-risk 市场记 `MANUAL`，请到网页手动领（BTC 5 分钟涨跌盘是普通二元市场，正常不会遇到）。
+- 查看：`GET /api/live/redeem`；立即跑一轮：`POST /api/live/redeem/run`（需要 `x-admin-token`）。
+- 链上部分用假链测试覆盖（分组、未结算等待、重试、转人工、calldata 编码），**没有在 Polygon 上真实执行过**。第一次请用小额，并在 Polygonscan 上核对交易。
+
 ### 实盘还需要你自己处理的事
 
-- **领取奖金**：窗口结束后，赢的份额要到 Polymarket 上 redeem 才会变回 USDC。账本会把仓位记成 `WON`，但不会自动发链上交易。
 - **授权与充值**：钱包需要先在 Polymarket 充 USDC 并完成交易授权（用网页下过一单即可）。
 - **成交手续费**：账本按 CLOB 回包的实际金额记账；Polymarket 的吃单费以其结算为准。
 - 实盘路径在本仓库的测试里用假 CLOB 覆盖，**没有连真实 Polymarket 跑过**。第一次上线请保持 dry-run、小额度，并对照 Polymarket 网页核对每一笔。
@@ -66,9 +101,12 @@
 | --- | --- | --- |
 | GET | `/api/strategy/status` | 开关、判官、通道、最近错误、战绩汇总 |
 | GET | `/api/strategy/decisions?limit=50` | 最近的决策（不含 state 原文） |
+| GET | `/api/strategy/orders?limit=50` | 异步下单队列里的单据 |
 | POST | `/api/strategy/switch` | `{"on": true/false}`，需要请求头 `x-admin-token` |
 | GET | `/api/live/status` | 地域检查结果、余额、风控用量（仅实盘） |
 | GET | `/api/live/orders`、`/api/live/positions` | 实盘账本（仅实盘） |
+| GET | `/api/live/redeem` | 自动领奖状态（方式、最近错误、已领数量） |
+| POST | `/api/live/redeem/run` | 立即领一轮，需要 `x-admin-token` |
 
 ## 4. 数据源够不够用
 
@@ -86,15 +124,28 @@
 | Chainlink 逐秒现货 | 结算按 Chainlink 算；领先幅度、末分钟已锁定部分都要它 | Polymarket RTDS `crypto_prices_chainlink`（新增 `market/chainlinkStream.ts`） |
 | 1m K 线（近一小时） | 算「正常波动」σ，没有它领先 $30 是多是少无从判断 | Binance `klines`（新增 `market/binance.ts`） |
 | 近 3 分钟实际波动 | 刚起波时一小时 σ 偏小，取两者大的，避免过度自信 | 由 Chainlink tick 计算 |
-| 主动买卖、大单、10/30 秒涨跌 | 短线动量；Chainlink 比交易所慢半拍，Binance 先动 | Binance `aggTrades` |
+| 主动买卖、大单、10/30 秒涨跌 | 短线动量；Chainlink 比交易所慢半拍，Binance 先动 | Binance `btcusdt@aggTrade` WebSocket 滚动缓存（REST `aggTrades` 只在缓存盖不住窗口时兜底） |
 | 开盘以来强平方向 | 连环强平会延续方向 | Binance 合约 `forceOrder` 流（可关：`BINANCE_LIQUIDATIONS=false`） |
 | 赔率 30 秒变化 | 市场在往哪边倒 | 策略回路每秒采样盘口中间价 |
 
 这些都已经写进发给 LLM 的 state，和上游 Jev 看到的内容一致。
 
+**「不知道」和「没有」分开说。** 发给判官的每一句都得是真的，数据缺席时宁可不写那一段：
+
+| 情况 | state 里的表现 |
+| --- | --- |
+| 开盘价未到、本回合还没有 Chainlink tick、K 线取不到 | 不问判官，决策记 `NO_STATE …` |
+| 逐笔数据没有从窗口开始之前就连续覆盖（流刚连上、或 REST 兜底的 1000 笔在行情快时只够十几秒） | `binance_flow` 里不写 `takers` / `large_trades`，`btc.latest` 里不写 Binance 10/30 秒涨跌 |
+| 强平流没连上、或连上的时刻晚于本窗口开盘 | `binance_flow` 里不写 `liquidations`（而不是写「none since the open」） |
+| 本回合盘口中间价采样还不满 30 秒 | `odds` 里不写 `odds_move` |
+| 盘口超过 `STRATEGY_BOOK_MAX_AGE_MS` 没刷新、Chainlink 超过 5 秒没跳 | 不问判官，记 `STALE_BOOK` / `STALE_CHAINLINK` |
+
+`market` 里「多久问一次」按 `STRATEGY_CHECKPOINTS` 的实际间距写；判官对三道题的原始回答存在 `strategy_decision.answers_json`。
+
 **还可以再加、但这次没加的：**
 
-- **CLOB WebSocket 盘口**：现在 5 秒轮询一次，上游用 WS 实时推。实盘时 `STRATEGY_BOOK_MAX_AGE_MS` 不宜调太小，或者可以把 `FEED_POLL_MS` 降到 2000。
+- ~~CLOB WebSocket 盘口~~：已改为 CLOB market 频道实时推送（`market/clobStream.ts`，`CLOB_WS=true` 默认开）。
+  盘口没变化时靠每 5 秒一次的 PING / PONG 确认仍有效；流断开或超过 5 秒没确认，轮询那一轮退回 REST 拉账本。
 - **盘口深度**：现在只取买一卖一。stake 大的话应该看前几档的量，免得价格被自己吃穿。
 - **资金费率 / 未平仓量**：对 5 分钟窗口作用弱，性价比不高。
 - **宏观事件日历**（CPI、FOMC 等）：数据公布前后波动完全不同，上游有新闻 / 财经日历模块，可以作为 `clock` 里的一句提示加进去。
