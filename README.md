@@ -17,20 +17,45 @@ cd backend && npm install && npm run dev
 cd frontend && npm install && npm run dev
 ```
 
-一键起容器：
+> 若宿主环境变量是 `NODE_ENV=production`，npm 会跳过 devDependencies（vite/tsc 就装不上），
+> 用 `npm install --include=dev` 显式带上。
+
+### 一键起容器
 
 ```bash
-docker compose up --build
+cp .env.example .env          # 可选：改端口与行情来源
+docker compose up --build -d
+# 前端 http://127.0.0.1:8080，后端 http://127.0.0.1:8787
+```
+
+前端由 nginx 托管，`/api` 反代到后端；SSE 那条路径单独关掉了缓冲
+（`proxy_buffering off`），否则事件会被 nginx 攒着、页面看着像「不推送」。
+
+`MARKET_FEED` 三档：
+
+| 值 | 行为 |
+| --- | --- |
+| `polymarket` | 只用真实盘口与 Chainlink TWAP（需要能访问 Polymarket） |
+| `simulated` | 只用本地闭式模拟行情，完全离线可跑通下单→结算全链路 |
+| `auto`（默认） | 先用真盘，连续失败到阈值自动降级为模拟 |
+
+```bash
+# 端口被占用时换一个（例如宿主已有服务占了 8080）
+FRONTEND_PORT=18080 docker compose up -d
+
+# 看日志 / 停掉
+docker compose logs -f backend
+docker compose down          # 加 -v 连数据卷一起删
 ```
 
 ## 测试
 
 ```bash
-cd backend  && npm test        # node:test
-cd frontend && npm test        # vitest
+cd backend  && npm test        # node:test，245 例
+cd frontend && npm test        # vitest，127 例
 ```
 
-后端与前端各自的类型检查：`npm run typecheck`。
+后端与前端各自的类型检查：`npm run typecheck`。前端生产构建：`npm run build`。
 
 ## 玩法规则
 
