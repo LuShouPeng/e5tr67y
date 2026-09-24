@@ -101,3 +101,38 @@ export function trimHistory<T extends { time: number }>(
   const cutoff = nowMs - keepMs;
   return points.filter((p) => p.time >= cutoff);
 }
+
+export interface ActivityKey {
+  ts: number;
+  username: string;
+  side: string;
+  amount: number;
+}
+
+function activityKey(item: ActivityKey): string {
+  return `${item.ts}|${item.username}|${item.side}|${item.amount}`;
+}
+
+/**
+ * 合并「REST 历史」与「SSE 实时」两路成交流。
+ *
+ * 首次进页面时 SSE 只推之后发生的事，历史得靠 REST 补——但补上之后
+ * 任何一条都可能重复出现（REST 回包慢于推送时尤其明显），所以按内容去重。
+ * SSE 的那份排在前面：它更新。
+ */
+export function mergeActivities<T extends ActivityKey>(
+  live: readonly T[],
+  seed: readonly T[],
+  max = 30,
+): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const item of [...live, ...seed]) {
+    const key = activityKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+    if (merged.length >= max) break;
+  }
+  return merged;
+}

@@ -4,7 +4,9 @@ import { createApiClient, type ApiClient } from './api/client.ts';
 import type { Side } from './api/types.ts';
 import { ERROR_HINT } from './api/types.ts';
 import { BetTicket } from './components/BetTicket.tsx';
+import { LiveFeed } from './components/LiveFeed.tsx';
 import { OddsBoard } from './components/OddsBoard.tsx';
+import { PnlCard } from './components/PnlCard.tsx';
 import { Positions } from './components/Positions.tsx';
 import { RoundHistory } from './components/RoundHistory.tsx';
 import { RoundPanel } from './components/RoundPanel.tsx';
@@ -118,6 +120,10 @@ export function App({ client = defaultClient }: AppProps) {
           />
 
           <RoundHistory client={client} refreshKey={refreshKey} />
+
+          <PnlCard client={client} refreshKey={refreshKey} balance={balance} />
+
+          <LiveFeed client={client} activities={market.activities} refreshKey={refreshKey} />
 
           <div className="card">
             <div className="card-head">
