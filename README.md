@@ -70,7 +70,7 @@ curl localhost:8787/api/strategy/status
 ## 测试
 
 ```bash
-cd backend  && npm test        # node:test，299 例
+cd backend  && npm test        # node:test，304 例
 cd frontend && npm test        # vitest，127 例
 ```
 

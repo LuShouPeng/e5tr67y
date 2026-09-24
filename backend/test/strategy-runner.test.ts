@@ -56,7 +56,10 @@ function scriptedJudge(choice: 'BUY_UP' | 'BUY_DOWN' | 'PASS' | 'HOLD' | 'SELL',
     calls: 0,
     async judge(): Promise<Judgment> {
       j.calls++;
-      return { judge: 'jev', model: 'fake', decision: { choice, probabilities: { [choice]: p } }, pUp: 0.6, latencyMs: 1, inputTokens: 10 };
+      return {
+        judge: 'jev', model: 'fake', decision: { choice, probabilities: { [choice]: p } }, pUp: 0.6, latencyMs: 1, inputTokens: 10,
+        answers: { up_wins: { noul: 0.6 }, down_wins: { noul: 0.4 }, entry: { choice } },
+      };
     },
   };
   return j;
@@ -110,7 +113,9 @@ describe('策略回路 × 模拟盘', () => {
     const { h, decisions, runner, broker, orders, checkpoint } = setup({ judge: scriptedJudge('BUY_UP') });
     const d = await checkpoint('T120');
     assert.equal(d!.action, 'BUY_UP');
-    assert.match(d!.reason!, /^BUY UP filled @0.56/);
+    // 判官那句原话保留在前，执行结果接在后面，首词仍是 BUY
+    assert.equal(d!.reason, 'BUY UP 0.800 ask 0.56 | filled @0.5600');
+    assert.deepEqual(JSON.parse(d!.answersJson!), { up_wins: { noul: 0.6 }, down_wins: { noul: 0.4 }, entry: { choice: 'BUY_UP' } });
     assert.equal(orders.recent(1)[0]!.status, 'FILLED');
     assert.equal(d!.pJudge, 0.6);
     assert.ok(d!.pModel! > 0.5);

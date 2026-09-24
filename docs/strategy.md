@@ -124,15 +124,28 @@
 | Chainlink 逐秒现货 | 结算按 Chainlink 算；领先幅度、末分钟已锁定部分都要它 | Polymarket RTDS `crypto_prices_chainlink`（新增 `market/chainlinkStream.ts`） |
 | 1m K 线（近一小时） | 算「正常波动」σ，没有它领先 $30 是多是少无从判断 | Binance `klines`（新增 `market/binance.ts`） |
 | 近 3 分钟实际波动 | 刚起波时一小时 σ 偏小，取两者大的，避免过度自信 | 由 Chainlink tick 计算 |
-| 主动买卖、大单、10/30 秒涨跌 | 短线动量；Chainlink 比交易所慢半拍，Binance 先动 | Binance `aggTrades` |
+| 主动买卖、大单、10/30 秒涨跌 | 短线动量；Chainlink 比交易所慢半拍，Binance 先动 | Binance `btcusdt@aggTrade` WebSocket 滚动缓存（REST `aggTrades` 只在缓存盖不住窗口时兜底） |
 | 开盘以来强平方向 | 连环强平会延续方向 | Binance 合约 `forceOrder` 流（可关：`BINANCE_LIQUIDATIONS=false`） |
 | 赔率 30 秒变化 | 市场在往哪边倒 | 策略回路每秒采样盘口中间价 |
 
 这些都已经写进发给 LLM 的 state，和上游 Jev 看到的内容一致。
 
+**「不知道」和「没有」分开说。** 发给判官的每一句都得是真的，数据缺席时宁可不写那一段：
+
+| 情况 | state 里的表现 |
+| --- | --- |
+| 开盘价未到、本回合还没有 Chainlink tick、K 线取不到 | 不问判官，决策记 `NO_STATE …` |
+| 逐笔数据没有从窗口开始之前就连续覆盖（流刚连上、或 REST 兜底的 1000 笔在行情快时只够十几秒） | `binance_flow` 里不写 `takers` / `large_trades`，`btc.latest` 里不写 Binance 10/30 秒涨跌 |
+| 强平流没连上、或连上的时刻晚于本窗口开盘 | `binance_flow` 里不写 `liquidations`（而不是写「none since the open」） |
+| 本回合盘口中间价采样还不满 30 秒 | `odds` 里不写 `odds_move` |
+| 盘口超过 `STRATEGY_BOOK_MAX_AGE_MS` 没刷新、Chainlink 超过 5 秒没跳 | 不问判官，记 `STALE_BOOK` / `STALE_CHAINLINK` |
+
+`market` 里「多久问一次」按 `STRATEGY_CHECKPOINTS` 的实际间距写；判官对三道题的原始回答存在 `strategy_decision.answers_json`。
+
 **还可以再加、但这次没加的：**
 
-- **CLOB WebSocket 盘口**：现在 5 秒轮询一次，上游用 WS 实时推。实盘时 `STRATEGY_BOOK_MAX_AGE_MS` 不宜调太小，或者可以把 `FEED_POLL_MS` 降到 2000。
+- **CLOB WebSocket 盘口**：现在 `FEED_POLL_MS`（默认 5 秒）轮询一次，上游用 WS 实时推。盘口时间戳记的是拿到账本那一刻，
+  策略默认 7 秒超龄；跑策略时建议 `FEED_POLL_MS=2000`，否则一次慢请求就会让检查点记 `STALE_BOOK`。
 - **盘口深度**：现在只取买一卖一。stake 大的话应该看前几档的量，免得价格被自己吃穿。
 - **资金费率 / 未平仓量**：对 5 分钟窗口作用弱，性价比不高。
 - **宏观事件日历**（CPI、FOMC 等）：数据公布前后波动完全不同，上游有新闻 / 财经日历模块，可以作为 `clock` 里的一句提示加进去。

@@ -202,6 +202,7 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
     }
 
     let quote: FeedSnapshot['quote'] = null;
+    let bookTs = nowMs;
     if (tokens.upTokenId != null && tokens.downTokenId != null) {
       const [upBook, downBook] = await Promise.all([
         getJson(clobBookUrl(tokens.upTokenId)),
@@ -210,12 +211,15 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       const up = parseBook(upBook.json);
       const down = parseBook(downBook.json);
       if (up != null && down != null) {
+        // 时间戳取拿到盘口的这一刻：这轮刷新前面还串行请求了开收盘价与 Gamma，用开始时刻会把盘口平白记老一两秒，
+        // 策略按盘口年龄拒单，差这一两秒就是 STALE_BOOK 与不 STALE 的区别
+        bookTs = clock.now();
         quotes.set({
           upBid: up.bid,
           upAsk: up.ask,
           downBid: down.bid,
           downAsk: down.ask,
-          ts: nowMs,
+          ts: bookTs,
         });
         quote = { upBid: up.bid, upAsk: up.ask, downBid: down.bid, downAsk: down.ask };
       }
@@ -228,7 +232,7 @@ export function createMarketFeed(options: FeedOptions): MarketFeed {
       quote,
       degraded: false,
     };
-    options.events?.publish('market', { ...(quote ?? {}), ts: nowMs, degraded: false });
+    options.events?.publish('market', { ...(quote ?? {}), ts: bookTs, degraded: false });
     return snapshot;
   }
 

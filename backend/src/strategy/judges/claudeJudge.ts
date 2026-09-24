@@ -96,6 +96,7 @@ export function createClaudeJudge(options: ClaudeJudgeOptions = {}): Judge {
         latencyMs: Date.now() - started,
         inputTokens: response.usage.input_tokens,
         rationale: out.rationale,
+        answers: out,
       };
     },
   };

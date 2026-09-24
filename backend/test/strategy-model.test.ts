@@ -136,6 +136,11 @@ describe('state：判官看到的盘面', () => {
     assert.ok(!('position' in s));
   });
 
+  it('market 里「多久问一次」按检查点间隔写', () => {
+    assert.match(buildState(ctx()).state.market as string, /asked again every 15 seconds\.$/);
+    assert.match(buildState(ctx({ askEverySeconds: 30 })).state.market as string, /asked again every 30 seconds\.$/);
+  });
+
   it('持仓时带 position', () => {
     const snap = buildState(ctx({ position: { side: 'UP', contracts: 10, avgPrice: 0.55 } }));
     const pos = snap.state.position as Record<string, string>;

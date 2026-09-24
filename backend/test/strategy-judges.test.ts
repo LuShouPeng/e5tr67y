@@ -57,6 +57,7 @@ describe('Jev 判官', () => {
     assert.ok(Math.abs(j.pUp! - 0.7) < 1e-12);
     assert.equal(j.model, 'jev-2026-09');
     assert.equal(j.inputTokens, 812);
+    assert.deepEqual(Object.keys(j.answers as Record<string, unknown>), ['up_wins', 'down_wins', 'entry']);
   });
 
   it('缺题或选项不对就抛错', async () => {
@@ -109,6 +110,7 @@ describe('Claude 判官', () => {
     assert.ok(Math.abs(j.decision.probabilities.BUY_DOWN! - 0.5) < 1e-12);
     assert.ok(Math.abs(j.pUp! - 0.3) < 1e-12);
     assert.equal(j.rationale, 'sellers dominate');
+    assert.equal((j.answers as { choice: string }).choice, 'BUY_DOWN');
     assert.equal(cap.params!.model, 'claude-opus-5');
     assert.equal(cap.params!.fallbacks, 'default');
     assert.deepEqual(cap.params!.betas, ['server-side-fallback-2026-07-01']);

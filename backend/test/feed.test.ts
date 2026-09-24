@@ -318,3 +318,24 @@ describe('事件推送与生命周期', () => {
     assert.ok(Math.abs(sim.closePrice(WS) - sim.openPrice(WS)) / sim.openPrice(WS) < 0.02);
   });
 });
+
+describe('盘口时间戳', () => {
+  it('取拿到账本的那一刻，而不是这轮刷新开始的时刻', async () => {
+    const h = makeHarness({ book: null });
+    const prices = createPriceHistory();
+    // 每个上游请求让时钟走 1 秒：开盘价、上一窗口、Gamma 先串行走 3 秒，账本才到
+    const slowFetch: FetchLike = async (url) => {
+      h.clock.advance(1000);
+      return (await stubFetch(OK_STUBS)(url));
+    };
+    const feed = createMarketFeed({
+      quotes: h.quotes, prices, service: h.service, clock: h.clock, fetchImpl: slowFetch, mode: 'polymarket',
+    });
+    const started = h.clock.now();
+    await feed.refresh();
+    const book = h.quotes.get()!;
+    assert.ok(book.ts > started + 2500, `盘口时间戳应晚于刷新开始：${book.ts - started}ms`);
+    assert.equal(book.ts, h.clock.now());
+    h.close();
+  });
+});

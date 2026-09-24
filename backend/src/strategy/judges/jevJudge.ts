@@ -120,6 +120,7 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
         pUp: (up.noul + 1 - down.noul) / 2,
         latencyMs: Date.now() - started,
         inputTokens: res.inputTokens,
+        answers: res.answers,
       };
     },
   };

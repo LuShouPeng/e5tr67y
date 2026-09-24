@@ -101,6 +101,8 @@ function toIntent(r: Record<string, unknown>): OrderIntent {
 export interface ExecutionPatch {
   action?: string;
   reason: string;
+  /** 成交：保留判官原话，把执行结果接在后面 */
+  keepReason?: boolean;
   fillId?: string | null;
   stake?: number | null;
   shares?: number | null;
@@ -171,6 +173,7 @@ export function createOrderQueue(options: OrderQueueOptions): OrderQueue {
     options.onSettled?.(load(intent.id), {
       action,
       reason,
+      keepReason: true,
       fillId: fill.id,
       stake: round4(fill.amount),
       shares: round4(fill.contracts),
@@ -206,7 +209,7 @@ export function createOrderQueue(options: OrderQueueOptions): OrderQueue {
         }
         const fill = await broker.buy({ windowStart: intent.windowStart, side: intent.side, stake, maxPrice: intent.limitPrice });
         const action = intent.side === 'UP' ? 'BUY_UP' : 'BUY_DOWN';
-        filled(intent, fill, `BUY ${intent.side} filled @${fill.avgPrice.toFixed(4)}${fill.dryRun ? ' DRY_RUN' : ''}`, action);
+        filled(intent, fill, `filled @${fill.avgPrice.toFixed(4)}${fill.dryRun ? ' DRY_RUN' : ''}`, action);
       } else {
         const bidNow = rules.bidOf(b.book, intent.side);
         if (bidNow == null || bidNow < intent.limitPrice) {
@@ -219,7 +222,7 @@ export function createOrderQueue(options: OrderQueueOptions): OrderQueue {
           return;
         }
         const fill = await broker.sell({ position: position as BrokerPosition, minPrice: intent.limitPrice });
-        filled(intent, fill, `SELL filled @${fill.avgPrice.toFixed(4)}${fill.dryRun ? ' DRY_RUN' : ''}`, 'SELL');
+        filled(intent, fill, `filled @${fill.avgPrice.toFixed(4)}${fill.dryRun ? ' DRY_RUN' : ''}`, 'SELL');
       }
     } catch (e) {
       if (e instanceof OrderRejectedError) {

@@ -14,6 +14,8 @@ export interface Judgment {
   inputTokens: number;
   /** 判官给的简短理由（Claude 才有） */
   rationale?: string | null;
+  /** 判官对三道题的原始回答，原样落库供事后复盘（up_wins / down_wins 单独记分要用） */
+  answers?: unknown;
 }
 
 /** 判官：拿着 state 回答「买 UP / 买 DOWN / 不买」或「拿着 / 卖掉」 */

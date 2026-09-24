@@ -39,11 +39,17 @@ const RECENT_VOL_SPAN_MS = 180_000;
 const FLOW_MIN_TRADES = 10;
 const ODDS_LOOKBACK_MS = 30_000;
 
-export const GAME =
-  "Polymarket 5-minute BTC market. UP pays 100¢ a share if BTC's average price over the final minute " +
-  'is at or above its average at the open; otherwise DOWN pays 100¢. You buy at the ask; a bet can also be sold ' +
-  'before the close at the bid. Every buy and every sell pays a fee. You hold at most one bet at a time and are asked ' +
-  'again every 15 seconds.';
+/** 玩法说明；「多久问一次」按实际检查点间隔写，改了 STRATEGY_CHECKPOINTS 这句也跟着对 */
+export function gameText(askEverySeconds = 15): string {
+  return (
+    "Polymarket 5-minute BTC market. UP pays 100¢ a share if BTC's average price over the final minute " +
+    'is at or above its average at the open; otherwise DOWN pays 100¢. You buy at the ask; a bet can also be sold ' +
+    'before the close at the bid. Every buy and every sell pays a fee. You hold at most one bet at a time and are asked ' +
+    `again every ${askEverySeconds} seconds.`
+  );
+}
+
+export const GAME = gameText();
 
 export const ESTIMATE_METHOD =
   "A zero-drift random-walk estimate of each side's chance of winning, using only BTC's gap to the " +
@@ -73,6 +79,8 @@ export interface MarketContext {
   /** 本回合 UP 中间价采样（赔率怎么动） */
   upMids: readonly Tick[];
   position: Position | null;
+  /** 检查点间隔（秒），只影响 market 里的措辞；缺省 15 */
+  askEverySeconds?: number;
 }
 
 export interface Raw {
@@ -116,7 +124,7 @@ export function buildState(ctx: MarketContext): Snapshot {
   const pMkt = impliedUp(book);
 
   const state: Record<string, unknown> = {
-    market: GAME,
+    market: gameText(ctx.askEverySeconds ?? 15),
     clock: `${clockPhrase(untilSettleEnd)}; ${Math.round(untilSettleEnd)} seconds until the settlement average is fixed`,
   };
 

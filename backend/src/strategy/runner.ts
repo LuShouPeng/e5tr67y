@@ -118,6 +118,11 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
     checkpointSeconds: [...new Set(options.config?.checkpointSeconds ?? DEFAULT_RUNNER_CONFIG.checkpointSeconds)].sort((a, b) => a - b),
   };
   const log = options.log ?? (() => {});
+  // 检查点间隔（写进 market 那句「多久问一次」）：取相邻检查点的最小间距
+  const askEverySeconds =
+    cfg.checkpointSeconds.length > 1
+      ? Math.min(...cfg.checkpointSeconds.slice(1).map((s, i) => s - cfg.checkpointSeconds[i]!))
+      : 15;
 
   let enabled = options.enabled ?? false;
   let busy = false;
@@ -150,7 +155,7 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
       broker: broker.kind, judge: judge.name, windowStart: ws, checkpoint: cp, decidedAt: t, action: 'ERROR', reason: null,
       pModel: null, pJudge: null, pMkt: null, judgeChoice: null, judgeChoiceP: null, edge: null, upAsk: null, upBid: null,
       downAsk: null, downBid: null, fillId: null, stake: null, shares: null, avgPrice: null, model: null, latencyMs: null,
-      inputTokens: null, rationale: null, stateJson: '{}', error: null, outcome: null, pnl: null,
+      inputTokens: null, rationale: null, answersJson: null, stateJson: '{}', error: null, outcome: null, pnl: null,
     };
   }
 
@@ -170,6 +175,7 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
     d.latencyMs = j.latencyMs;
     d.inputTokens = j.inputTokens;
     d.rationale = j.rationale ?? null;
+    d.answersJson = j.answers === undefined ? null : JSON.stringify(j.answers);
   }
 
   /** 单据最晚执行时间：过了最后检查点就可能撞上锁盘 */
@@ -259,6 +265,7 @@ export function createStrategyRunner(options: RunnerOptions): StrategyRunner {
           book: b.book,
           upMids,
           position,
+          askEverySeconds,
         });
       } catch (e) {
         if (e instanceof StateUnavailableError) {

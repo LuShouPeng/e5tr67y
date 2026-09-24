@@ -162,7 +162,7 @@ if (config.strategy.enabled) {
     decisions = createDecisionRepo(db);
   }
 
-  if (config.binanceLiquidations) binance.startLiquidations();
+  binance.start({ liquidations: config.binanceLiquidations });
   const decisionLog = decisions;
   const marketData = createStrategyMarketData({
     feed,
