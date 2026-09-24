@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { createApiClient, type ApiClient } from './api/client.ts';
 import type { Side } from './api/types.ts';
 import { ERROR_HINT } from './api/types.ts';
 import { BetTicket } from './components/BetTicket.tsx';
 import { OddsBoard } from './components/OddsBoard.tsx';
+import { Positions } from './components/Positions.tsx';
+import { RoundHistory } from './components/RoundHistory.tsx';
 import { RoundPanel } from './components/RoundPanel.tsx';
 import { usePredictionMarket } from './hooks/usePredictionMarket.ts';
 import { fmtCountdown, fmtWindow } from './lib/format.ts';
@@ -19,10 +21,13 @@ const defaultClient = createApiClient();
 export function App({ client = defaultClient }: AppProps) {
   const [pick, setPick] = useState<Side>('UP');
   const [balance, setBalance] = useState<number | null>(null);
+  /** 下单/卖出/结算后自增，驱动持仓与往期回合重新拉取 */
+  const [refreshKey, setRefreshKey] = useState(0);
   const market = usePredictionMarket(client);
+  const bump = useCallback(() => setRefreshKey((n) => n + 1), []);
 
-  // 余额只在回合切换或下单后刷新，不跟每秒心跳
-  const walletTick = `${market.round?.windowStart ?? ''}`;
+  // 余额跟着回合切换与成交刷新，不跟每秒心跳
+  const walletTick = `${market.round?.windowStart ?? ''}:${market.activities.length}:${refreshKey}`;
   useEffect(() => {
     let alive = true;
     void client
@@ -34,7 +39,7 @@ export function App({ client = defaultClient }: AppProps) {
     return () => {
       alive = false;
     };
-  }, [client, walletTick, market.activities.length]);
+  }, [client, walletTick]);
 
   return (
     <div className="shell">
@@ -102,8 +107,17 @@ export function App({ client = defaultClient }: AppProps) {
             tradable={market.round?.status === 'OPEN'}
             quoteStale={market.quoteStale}
             balance={balance}
-            onSubmitted={() => void market.refresh()}
+            onSubmitted={bump}
           />
+
+          <Positions
+            client={client}
+            refreshKey={refreshKey}
+            currentWindowStart={market.round?.windowStart ?? null}
+            onChanged={bump}
+          />
+
+          <RoundHistory client={client} refreshKey={refreshKey} />
 
           <div className="card">
             <div className="card-head">
